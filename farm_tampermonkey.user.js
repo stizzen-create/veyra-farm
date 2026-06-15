@@ -1,0 +1,1895 @@
+// ==UserScript==
+// @name         Veyra Multi-Farm Bot
+// @namespace    https://demonicscans.org/
+// @author       UANM
+// @version      1.17.1
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
+// @match        https://demonicscans.org/*
+// @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
+// @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+(function () {
+'use strict';
+
+const BASE       = 'https://demonicscans.org';
+const SKILL_ID   = -1;    // power (default 10-stam hit)
+const SKILL_COST = 10;
+const ATK_GAP    = 1600;  // ms between attacks
+// Stamina potions the bot may drink, in PRIORITY order. RULE (user): NEVER touch FSP
+// (item 35, Full Stamina Potion) — only ever spend LSP (251, Large, +5000), and only
+// if needed. FSP is kept untouched, so it's deliberately NOT in this list.
+const STAM_POTS = [
+  { item: 251, name: 'LSP' },   // Large Stamina Potion (+5000) — the ONLY potion the bot drinks
+];
+
+// Attack tiers (skill_id → stamina). Damage is LINEAR in stamina (verified from
+// the battle-page formula: dmg = K * stamina_cost, K constant per fight). So we
+// can deliver an EXACT stamina amount by composing tiers, landing within 1
+// stamina (=K dmg) of the target instead of overshooting by a whole 10-stam hit.
+// Ordered largest→smallest so SKILLS.find(s => s.stam <= want) is greedy.
+const SKILLS = [
+  { id: -5, stam: 1000 },
+  { id: -4, stam: 200  },
+  { id: -3, stam: 100  },
+  { id: -2, stam: 50   },
+  { id: -1, stam: 10   },
+  { id:  0, stam: 1    },
+];
+
+// ── WAVE / TARGET CONFIG ──────────────────────────────────────────────────────
+// useLSP values:
+//   false      — no potions
+//   'once'     — 1 LSP at start of each mob attack (Pan, Orion)
+//   'asNeeded' — LSP every time stamina runs out (G3W8 timed)
+
+// ── DEFAULT CONFIG (serializable → editable from the Settings tab) ─────────────
+// No closures here: match is expressed as include/exclude name lists so the whole
+// thing can live in GM_setValue. makeMatch() rebuilds the predicate at runtime.
+//   include: [] → matches ANY mob; else name must contain one of these
+//   exclude: [] → matches everything not containing one of these
+const DEFAULT_CONFIG = [
+  { id:'g3w8', gate:3, wave:8, enabled:true, targets:[
+    { key:'drakzareth', label:'Drakzareth the Tyrant Lizard King',     include:['drakzareth'], exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+    { key:'skarn',      label:'General Skarn the Radiant Bastion',     include:['skarn'],      exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+    { key:'vessir',     label:'General Vessir the Sunfang Duelist',    include:['vessir'],     exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+    { key:'hrazz',      label:'General Hrazz the Dawnflame Oathkeeper', include:['hrazz'],     exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+  ]},
+  { id:'g5w9', gate:5, wave:9, enabled:true, targets:[
+    // Oceanus a 3B con pozioni (asNeeded) come i boss g3w8 — non droppa FSP ma lo vogliamo full.
+    { key:'oceanus',    label:'Oceanus the Water Titan',              include:['oceanus'],    exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+  ]},
+  { id:'g5w10', gate:5, wave:10, enabled:true, targets:[
+    { key:'pan',        label:'Pan, Wild Herald of Hermes',           include:['pan'],        exclude:[],                 dmgTarget:120_000_000, killLimit:null, useLSP:'asNeeded', timer:true,  enabled:true },
+    { key:'g5w10-farm', label:'G5W10 Farm',                          include:[],             exclude:['pan','hermes'],   dmgTarget:100_000_000, killLimit:400,  useLSP:false, timer:false, enabled:true },
+  ]},
+  { id:'g5w11', gate:5, wave:11, enabled:true, targets:[
+    { key:'orion',      label:'Orion, Eternal Hunter of Artemis',     include:['orion'],      exclude:[], dmgTarget:500_000_000, killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+  ]},
+];
+
+function makeMatch(include = [], exclude = []) {
+  const inc = include.map(s => String(s).toLowerCase().trim()).filter(Boolean);
+  const exc = exclude.map(s => String(s).toLowerCase().trim()).filter(Boolean);
+  return m => (inc.length === 0 || inc.some(n => m.name.includes(n)))
+           && !exc.some(n => m.name.includes(n));
+}
+
+// Short human label for a page URL (wave / event / gate / guild dungeon).
+function pageLabel(url) {
+  try {
+    const u = new URL(url, BASE), p = u.searchParams;
+    if (u.pathname.includes('active_wave')) {
+      if (p.get('gate') && p.get('wave')) return `G${p.get('gate')}W${p.get('wave')}`;
+      if (p.get('event'))                 return `Ev${p.get('event')}W${p.get('wave') || '?'}`;
+    }
+    if (u.pathname.includes('battle.php') && p.get('dgmid')) return `🏰 Dungeon boss ${p.get('dgmid')}`;
+    if (u.pathname.includes('guild_dungeon_location.php')) return `🏰 Guild dungeon ${p.get('location_id') || ''}`.trim();
+    if (u.pathname.includes('gate.php')) return `Gate ${p.get('id') || ''}`.trim();
+    if (u.pathname.includes('wave.php')) return `Wave ${p.get('id') || ''}`.trim();
+    return (u.pathname.replace(/^\//, '').replace(/\.php$/, '') + (p.get('id') ? ` ${p.get('id')}` : '')) || url;
+  } catch { return url; }
+}
+
+// safe "&dead_page=N" append (works whether url already has a query or not)
+function withDeadPage(url, p) { return url + (url.includes('?') ? '&' : '?') + 'dead_page=' + p; }
+
+// source url for a config entry: explicit url, or derived from legacy gate/wave.
+function srcUrl(w) {
+  return w.url || (w.gate != null ? `${BASE}/active_wave.php?gate=${w.gate}&wave=${w.wave}` : '');
+}
+
+// Build the runtime WAVES (page sources with compiled match fns) from saved config.
+// Disabled sources/targets are dropped so the main loop never sees them.
+function buildWaves() {
+  return (S.config || []).filter(w => w.enabled !== false && w.kind !== 'dungeon' && w.kind !== 'dungeonloc').map(w => ({
+    id:    w.id,
+    label: w.label || pageLabel(srcUrl(w)) || w.id,
+    url:   srcUrl(w),
+    targets: (w.targets || []).filter(t => t.enabled !== false).map(t => ({
+      ...t,
+      match: makeMatch(t.include, t.exclude),
+    })),
+  })).filter(w => w.url);
+}
+
+let WAVES = [];   // populated after S.config is initialized (see STATE section)
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+const SK = 'veyra_mfarm_v1';
+const defState = () => ({
+  kills: {}, attacks: 0, timers: {}, lspInv: null, potInv: {}, started: Date.now(),
+  timedKills: 0, timedBy: {}, lspUses: 0, hpHeals: 0, pos: null, config: null,
+  paused: false,
+  minimized: false,        // panel collapsed state — persists across page reloads
+  _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
+  // Hit style. OFF (default) = EXACT, minimal-overshoot: every fight composes tiers
+  // so it lands within ~1 small hit of the target (no stamina wasted — "danni precisi
+  // per tutto"). ON = proc-farming: fixed 50-stam Heroic hits for more Orryphos
+  // free-hit procs, but it overshoots small targets (e.g. ~19M on a 5M quest mob).
+  smallHits: false,
+  _exactMigrated: false,   // one-time flip of the old proc-farming default → exact
+  // master kill-switch per le pozioni stamina (LSP). Le pozioni vengono usate SOLO
+  // dai target timed (hanno useLSP:'asNeeded'); i farm hanno useLSP:false e non le
+  // toccano mai. Default ON = la logica voluta (pozioni solo per i timed). Mettere
+  // OFF per non spendere NESSUNA pozione (farm solo con stamina naturale).
+  lspEnabled: true,
+  // ── Adventurer's Guild quests (auto accept → farm g5w9 → finish → next) ──
+  // ON = il bot accetta una quest disponibile (fuori cooldown), farma il suo mob
+  // su g5w9 fino al target del server, la consegna e prende la successiva.
+  questEnabled: true,
+  questTaken: 0, questDone: 0,   // contatori accettate / consegnate
+  questActive: null,             // {id,title,monster,minDmg,have,need} cache per UI + farm
+});
+let S = (() => {
+  try { return JSON.parse(GM_getValue(SK, 'null')) || defState(); }
+  catch { return defState(); }
+})();
+// migrate older saved state so new fields always exist
+for (const [k, v] of Object.entries(defState())) if (S[k] === undefined) S[k] = v;
+// v1.16.0: minimal-overshoot is now the standard everywhere (user: "danni precisi per
+// tutto"). Flip the old proc-farming default OFF once on existing installs — the user
+// can still re-enable it from the ⚔️ toggle (it won't be flipped again).
+if (S._exactMigrated !== true) { S.smallHits = false; S._exactMigrated = true; }
+// seed the editable wave config on first run (or if wiped)
+if (!Array.isArray(S.config) || !S.config.length) {
+  S.config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+}
+// backfill url + label on legacy gate/wave sources so the URL-based UI works
+for (const w of S.config) {
+  if (!w.url)   w.url   = srcUrl(w);
+  if (!w.label) w.label = pageLabel(w.url) || w.id;
+}
+const save = () => GM_setValue(SK, JSON.stringify(S));
+
+// compile the runtime waves from the saved config; call again after edits
+function rebuildWaves() {
+  WAVES = buildWaves();
+  for (const k of Object.keys(_waveCache)) delete _waveCache[k];   // drop stale cache
+}
+WAVES = buildWaves();
+
+// Does this mob name belong to a TIMED target anywhere? Timed ALWAYS wins over a
+// farm target (especially a wildcard include:[] like g5w10-farm): a timed boss is
+// never attacked nor counted by the farm pass, and never shows up in the 🎯 Farming
+// list — it lives only under ⏰ Boss timers. (Fixes "general hrazz" leaking into farm.)
+function isTimedName(name) {
+  const m = { name: String(name || '').toLowerCase().trim() };
+  for (const w of WAVES) for (const t of w.targets)
+    if (t.timer && t.match(m)) return true;
+  return false;
+}
+
+// v1.16.2: a farm wildcard used to also count timed bosses (general hrazz landed in
+// Farming). Purge any kill entries that belong to a timed target so they leave the
+// list; from now on isTimedName() keeps them out.
+if (S._timedKillsPurged !== true) {
+  for (const name of Object.keys(S.kills || {})) if (isTimedName(name)) delete S.kills[name];
+  S._timedKillsPurged = true; save();
+}
+
+// ── CONTROL ───────────────────────────────────────────────────────────────────
+// paused persists in S so a page navigation doesn't silently resume the bot.
+let paused  = S.paused === true;
+let running = true;
+let status  = 'starting…';
+
+// ── LOG ───────────────────────────────────────────────────────────────────────
+const LOG_MAX = 300;                 // keep a deeper history for debugging
+const logBuf  = [];
+const fullLog = [];                  // unbounded-ish copyable trace (capped at 2000)
+
+function log(msg, color = '#aaa') {
+  const ts  = new Date().toTimeString().slice(0,8);
+  logBuf.push({ ts, msg, color });
+  if (logBuf.length > LOG_MAX) logBuf.shift();
+  fullLog.push(`${ts} ${msg.replace(/<[^>]+>/g, '')}`);
+  if (fullLog.length > 2000) fullLog.shift();
+  // copy the whole trace from the console with: copy(window.__farmLog())
+  try { window.__farmLog = () => fullLog.join('\n'); } catch {}
+  console.log(`[FarmBot ${ts}] ${msg}`);
+}
+
+// ── HTTP ──────────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// fetch with a hard timeout — a stalled request used to hang the whole loop
+// forever (no native timeout). On abort we resolve to an error so the loop
+// retries on the next cycle instead of freezing on "fetch …".
+function fetchT(url, opts = {}, ms = 15000) {
+  const ctrl = new AbortController();
+  const id   = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { credentials: 'include', ...opts, signal: ctrl.signal })
+    .finally(() => clearTimeout(id));
+}
+
+async function post(path, data) {
+  try {
+    const r = await fetchT(`${BASE}/${path}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    new URLSearchParams(data).toString(),
+    }, 12000);
+    return await r.json();
+  } catch { return null; }
+}
+
+async function getHtml(url) {
+  try {
+    const r = await fetchT(url, {}, 15000);
+    if (!r.ok) { log(`HTTP ${r.status} for ${url.slice(-20)}`, '#f66'); return ''; }
+    return await r.text();
+  } catch (e) {
+    log(`fetch timeout/err: ${e.name === 'AbortError' ? 'timeout' : e.message}`, '#f66');
+    return '';
+  }
+}
+
+// ── STAMINA / HP ──────────────────────────────────────────────────────────────
+let stam    = 0;
+let userHp  = null;    // last known HP (from retaliation.user_hp_after)
+let hpEmpty = false;   // true once HP potions run out (avoid spamming the endpoint)
+// persistent counters live on S: S.hpHeals, S.lspUses, S.timedKills
+
+function parseStam(html) {
+  const m = html.match(/id="stamina_span"[^>]*>\s*([\d,]+)/)
+         || html.match(/Stamina[^\d]{0,20}([\d,]+)/i);
+  if (m) stam = parseInt(m[1].replace(/,/g, '')) || stam;
+}
+
+function readStamFromDOM() {
+  // try to read stamina directly from the current page DOM (no fetch needed)
+  const el = document.getElementById('stamina_span')
+          || document.querySelector('[id*="stamina"]');
+  if (el) {
+    const n = parseInt(el.textContent.replace(/[^\d]/g, ''));
+    if (!isNaN(n) && n > 0) { stam = n; log(`stamina from DOM: ${stam}`, '#0cf'); return; }
+  }
+  // fallback: regex on full page text
+  const m = document.body?.innerText?.match(/Stamina[^\d]{0,20}([\d,]+)/i);
+  if (m) { stam = parseInt(m[1].replace(/,/g, '')); log(`stamina from page: ${stam}`, '#0cf'); }
+}
+
+// ── USER ID ───────────────────────────────────────────────────────────────────
+const uid = () =>
+  document.cookie.split(';')
+    .find(c => c.trim().startsWith('demon='))?.split('=')[1]?.trim() || '';
+
+// ── LSP ───────────────────────────────────────────────────────────────────────
+// resolve inv_id + qty for every stamina potion in STAM_POTS (parsed from the DOM,
+// so it survives markup changes better than a flat regex)
+async function refreshInv() {
+  const html = await getHtml(`${BASE}/inventory.php`);
+  if (!html) return;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  S.potInv = S.potInv || {};
+  for (const p of STAM_POTS) {
+    const card = doc.querySelector(`[data-item-id="${p.item}"]`);
+    if (card) {
+      const inv = card.getAttribute('data-inv-id');
+      const qty = parseInt(card.querySelector('.potion-qty-left')?.textContent.replace(/[^\d]/g, '') || '0');
+      S.potInv[p.item] = { inv, qty: Number.isFinite(qty) ? qty : null };
+    } else {
+      delete S.potInv[p.item];
+    }
+  }
+  S.lspInv = S.potInv[251]?.inv || null;   // legacy field, kept in sync (LSP only — FSP never touched)
+  save();
+  log(`potions: ${STAM_POTS.map(p => `${p.name} x${S.potInv[p.item]?.qty ?? 0}`).join(' · ')}`, '#0cf');
+}
+
+// first potion in priority order that still has stock (LSP only — FSP is never touched)
+function pickPotion() {
+  for (const p of STAM_POTS) {
+    const e = S.potInv?.[p.item];
+    if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...p, inv: e.inv };
+  }
+  return null;
+}
+
+async function useLSP() {
+  if (!S.lspEnabled) return false;   // potions disabled — don't waste them (toggle in Settings ⚙)
+  let pick = pickPotion();
+  if (!pick) { await refreshInv(); pick = pickPotion(); }
+  if (!pick) { log('no LSP left (FSP is never used)', '#f66'); return false; }
+
+  // Read the RAW response. use_item.php may not return clean JSON — when it didn't,
+  // post() returned null, so `ok` was always false: the counter stayed at 0 and
+  // stamina was never updated (which also caused a second potion to be wasted).
+  let txt = '', data = null, httpStatus = 0;
+  try {
+    const r = await fetchT(`${BASE}/use_item.php`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    new URLSearchParams({ inv_id: pick.inv, qty: 1 }).toString(),
+    }, 12000);
+    httpStatus = r.status;
+    txt = await r.text();
+    try { data = JSON.parse(txt); } catch {}
+  } catch (e) { log(`${pick.name} request error: ${e.message}`, '#f66'); return false; }
+
+  // success if JSON says so, OR the raw text mentions success/stamina/refill,
+  // OR the text contains no explicit error.
+  const ok = !!(data && (data.status === 'success' || data.success === true || data.stamina !== undefined))
+          || /success|refill|stamina/i.test(txt)
+          || (!!txt && !/error|fail|not enough|don'?t have|invalid/i.test(txt));
+
+  if (ok) {
+    S.lspUses++;
+    // decrement the local stock so we don't keep picking an empty potion before the
+    // next inventory refresh (and so the panel count is live).
+    const e = S.potInv?.[pick.item];
+    if (e && typeof e.qty === 'number') e.qty = Math.max(0, e.qty - 1);
+    // FSP fully refills stamina; LSP gives +5000. Read the new value from the
+    // response if present; otherwise assume a refill so the caller doesn't grab a
+    // second potion. The next damage.php response carries the real stamina.
+    const fromText = (txt.match(/stamina["':\s]+([\d,]+)/i)?.[1] || '').replace(/,/g, '');
+    const parsed   = parseInt(data?.stamina ?? fromText);
+    stam = (Number.isFinite(parsed) && parsed > 0) ? parsed : Math.max(stam, 5000);
+    save();
+  } else if (/not enough|don'?t have|0|empty|invalid/i.test(txt)) {
+    // this potion is actually empty — zero it and let the next call fall through to
+    // the backup (LSP) on the following attempt.
+    if (S.potInv?.[pick.item]) S.potInv[pick.item].qty = 0;
+    save();
+  }
+  log(ok ? `🧪 ${pick.name} used (#${S.lspUses}) — stamina now ${stam} · left x${S.potInv?.[pick.item]?.qty ?? '?'}`
+        : `${pick.name} failed — response: ${txt.slice(0, 80).replace(/\s+/g, ' ')}`,
+      ok ? '#0cf' : '#f66');
+  return ok;
+}
+
+// ── HP HEAL ─────────────────────────────────────────────────────────────────
+// user_heal_potion.php {user_id} → restores full HP (item 108, no inv_id needed).
+// Verified endpoint (same one veyra_colab uses). Returns {status, user_hp,
+// potions_remaining}. Called the moment a retaliation kills us so the bot keeps
+// fighting instead of sitting dead (which silently stalls ALL attacks).
+async function healUp() {
+  if (hpEmpty) return false;
+  const d = await post('user_heal_potion.php', { user_id: uid() });
+  const ok = !!(d && (d.status === 'success' || /full hp/i.test(d.message || '')));
+  if (ok) {
+    userHp = parseInt(d.user_hp) || userHp;
+    S.hpHeals++; save();
+    const left = d.potions_remaining ?? '?';
+    if (left === 0 || left === '0') hpEmpty = true;
+    log(`💀→❤️ died: HP potion used (#${S.hpHeals}, left: ${left})`, '#f44');
+  } else {
+    const msg = d?.message || 'no resp';
+    if (/no potion|0 potion|don'?t have|out of/i.test(msg)) hpEmpty = true;
+    log(`HP heal failed: ${msg}`, '#f66');
+  }
+  return ok;
+}
+
+// ── WAVE PARSE ────────────────────────────────────────────────────────────────
+// data-boss is ALWAYS 0 (verified) → boss detection is name-based via match fns.
+// data-expire = unix timestamp (death/respawn). data-dead = 0 alive / 1 dead.
+// _collectMobs / _collectAutoSummon work on ANY root (a parsed doc OR the live
+// `document`) so scanning the current page needs no fetch (→ no cookie race).
+function _collectMobs(root) {
+  const out = {};
+  for (const c of root.querySelectorAll('.monster-card')) {
+    const id = c.dataset.monsterId;
+    if (!id) continue;
+    out[id] = {
+      id,
+      name:    (c.dataset.name || '').toLowerCase().trim(),
+      dead:    c.dataset.dead === '1',
+      userdmg: parseInt(c.dataset.userdmg || '0'),
+      expire:  parseInt(c.dataset.expire || '0'),  // unix ts
+    };
+  }
+  return out;
+}
+function parseMobs(html) {
+  return _collectMobs(new DOMParser().parseFromString(html, 'text/html'));
+}
+
+// Auto-summon cards carry the authoritative boss timers:
+//   .auto-summon-name, data-alive (1/0), data-next-ts (unix respawn ts)
+function _collectAutoSummon(root) {
+  for (const c of root.querySelectorAll('.auto-summon-card')) {
+    const nm = (c.querySelector('.auto-summon-name')?.textContent || '').toLowerCase().trim();
+    if (!nm) continue;
+    S.timers[nm] = {
+      alive:  c.dataset.alive === '1',
+      nextTs: parseInt(c.dataset.nextTs || '0'),  // seconds
+    };
+  }
+  save();
+}
+function parseAutoSummon(html) {
+  _collectAutoSummon(new DOMParser().parseFromString(html, 'text/html'));
+}
+
+// Guild-dungeon LOCATION page (guild_dungeon_location.php?instance_id=…&location_id=…)
+// lists many `.mon` cards — each a SEPARATE boss instance with its own dgmid
+// (View → battle.php?dgmid=…&instance_id=…). The monster name comes from the image
+// filename (Prismblade_Reaver.webp → "prismblade reaver"); a `.mon.dead` class marks
+// a killed/looted instance. Works on a parsed doc OR the live `document`.
+function _collectDungeonMons(root) {
+  const out = [];
+  for (const c of root.querySelectorAll('.mon')) {
+    const a    = c.querySelector('a[href*="battle.php"]');
+    const href = a ? a.getAttribute('href') : '';
+    const dgmid       = (href.match(/dgmid=(\d+)/)       || [])[1];
+    const instance_id = (href.match(/instance_id=(\d+)/) || [])[1];
+    if (!dgmid) continue;
+    const file = (c.querySelector('img')?.getAttribute('src') || '').split('?')[0].split('/').pop() || '';
+    const name = file.replace(/\.\w+$/, '').replace(/[_-]+/g, ' ').toLowerCase().trim();
+    out.push({ dgmid, instance_id, name, dead: /(^|\s)dead(\s|$)/.test(c.className) });
+  }
+  return out;
+}
+function parseDungeonMons(html) {
+  return _collectDungeonMons(new DOMParser().parseFromString(html, 'text/html'));
+}
+
+// per-target auto-die timestamp of the currently-alive boss instance (seconds).
+// data-expire on the wave card === AUTO_DIE_CFG.nextDieMs on battle.php (verified):
+// it's when the boss auto-dies and respawns with a fresh id + reset userdmg.
+const liveBoss = {};
+
+const _waveCache = {};
+const CACHE_TTL  = 30_000;
+
+// Guild-dungeon LOCATION caches: _dlCache throttles page reads per source; _dlLooted
+// records dgmids we've already claimed (cleared implicitly — respawns get new dgmids).
+const _dlCache  = {};
+const _dlLooted = new Set();
+
+const DEAD_PAGES = 6;   // max dead pages to scan per wave
+
+// View cookies: hide_dead_monsters (1=alive view, 0=dead/unclaimed view) and
+// show_dead_bosses_only (1=only dead bosses). These are the 3 wave tabs
+// (Show Alive / Show all dead / Dead bosses only).
+//
+// CRITICAL: write them HOST-ONLY (no domain=), exactly like the page's own
+// setCookie. The old code used `domain=demonicscans.org`, which created a SECOND,
+// separate cookie that fought the page's host-only one — the server then read the
+// wrong value and HID the alive mobs ("lo script nasconde i mob"). We also purge
+// those bad domain duplicates once at startup.
+function setCookieRaw(name, val) { document.cookie = `${name}=${val}; path=/; SameSite=Lax`; }
+function getCookieRaw(name) {
+  const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+  return m ? m[1] : null;
+}
+function setHideDead(on) { setCookieRaw('hide_dead_monsters', on ? 1 : 0); }
+
+// snapshot/restore the tab the USER has selected, so the bot's reads never change
+// what the user sees on the wave page.
+function saveUserView() { return { h: getCookieRaw('hide_dead_monsters'), b: getCookieRaw('show_dead_bosses_only') }; }
+function restoreUserView(v) {
+  setCookieRaw('hide_dead_monsters', v.h != null ? v.h : 1);
+  setCookieRaw('show_dead_bosses_only', v.b != null ? v.b : 0);
+}
+function purgeDomainCookies() {
+  for (const n of ['hide_dead_monsters', 'show_dead_bosses_only']) {
+    document.cookie = `${n}=; domain=demonicscans.org; path=/; Max-Age=0`;
+    document.cookie = `${n}=; domain=.demonicscans.org; path=/; Max-Age=0`;
+  }
+}
+
+// needDead: scan the dead pages so dead instances (farm trash AND timed bosses)
+// can be looted. The cache records whether it included dead; a needDead request
+// will NOT reuse an alive-only cache entry (that was the bug that left 100+ mobs
+// unlooted — Phase 1 cached alive-only, Phase 2 reused it and never saw the dead).
+async function fetchWave(url, needDead = false) {
+  const now = Date.now();
+  const hit = _waveCache[url];
+  if (hit && now - hit.ts < CACHE_TTL && (!needDead || hit.hadDead)) return hit.mobs;
+
+  const view = saveUserView();     // remember the tab the user is on
+  setCookieRaw('show_dead_bosses_only', 0);
+
+  // ── ALIVE mobs: hide_dead_monsters=1 ──
+  setHideDead(true);
+  const html = await getHtml(url);
+  parseStam(html);
+  parseAutoSummon(html);           // boss timers
+  const mobs = parseMobs(html);    // alive cards
+
+  // ── DEAD mobs (for looting): hide_dead_monsters=0 + dead_page pagination ──
+  if (needDead) {
+    setHideDead(false);
+    for (let p = 1; p <= DEAD_PAGES; p++) {
+      status = `fetch dead ${p}/${DEAD_PAGES}…`; renderUI();
+      const h2   = await getHtml(withDeadPage(url, p));
+      const more = parseMobs(h2);
+      let added  = 0;
+      for (const [id, m] of Object.entries(more)) {
+        if (m.dead && !mobs[id]) { mobs[id] = m; added++; }
+      }
+      if (!added) break;
+    }
+  }
+
+  restoreUserView(view);   // put the user's selected tab back — never hide their mobs
+  const result = Object.values(mobs);
+  _waveCache[url] = { ts: Date.now(), mobs: result, hadDead: needDead };
+  return result;
+}
+
+// ── TIMED WATCHDOG ────────────────────────────────────────────────────────────
+// Light check (1 GET per timed-wave, no dead pagination) to see if any timed boss
+// is alive and still needs damage. Throttled so it never spams the server.
+let _lastTimedCheck = 0;
+let _timedInterrupt = false;
+const TIMED_CHECK_INTERVAL = 25_000;
+
+async function anyTimedReady() {
+  const now = Date.now();
+  if (now - _lastTimedCheck < TIMED_CHECK_INTERVAL) return false;
+  _lastTimedCheck = now;
+  for (const wave of WAVES) {
+    const timed = wave.targets.filter(t => t.timer);
+    if (!timed.length) continue;
+    const view = saveUserView();
+    setCookieRaw('show_dead_bosses_only', 0);
+    setHideDead(true);
+    const html = await getHtml(wave.url);   // alive mobs only (light, no dead pages)
+    restoreUserView(view);                  // put the user's tab back
+    parseStam(html);
+    parseAutoSummon(html);
+    const mobs = Object.values(parseMobs(html));
+    for (const t of timed) {
+      if (mobs.some(m => !m.dead && t.match(m) && m.userdmg < t.dmgTarget)) {
+        const hit = mobs.find(m => !m.dead && t.match(m) && m.userdmg < t.dmgTarget);
+        log(`⏰ ${hit.name} ready in ${wave.id} → back to bosses`, '#f90');
+        delete _waveCache[wave.url];        // force fresh fetch in phase 1
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The REAL auto-die countdown is NOT the wave card's data-expire (that's a far
+// despawn ts). It lives on the boss's battle page as
+//   window.AUTO_DIE_CFG = { nextDieMs, serverNowMs }
+// (the "AUTO DIES AFTER hh:mm:ss" chip). We fetch it and adjust for client/server
+// clock skew, returning a client-clock unix-seconds death time.
+async function fetchAutoDie(mid) {
+  const html = await getHtml(`${BASE}/battle.php?id=${mid}`);
+  const nd = html.match(/nextDieMs\s*:\s*(\d+)/);
+  if (!nd) return null;
+  const sn = html.match(/serverNowMs\s*:\s*(\d+)/);
+  const remainMs = parseInt(nd[1]) - (sn ? parseInt(sn[1]) : Date.now());
+  return Math.floor((Date.now() + remainMs) / 1000);   // client-clock death ts (s)
+}
+
+// Keep the panel's boss death/respawn countdowns fresh even during a long fight
+// (the main loop is blocked inside fightTarget for minutes on a big boss). Throttled
+// to ~15s. Updates liveBoss (real auto-die, from each alive boss's battle page) +
+// S.timers (respawn) without disturbing the user's selected view tab.
+let _lastTimerRefresh = 0;
+async function refreshTimers() {
+  const now = Date.now();
+  if (now - _lastTimerRefresh < 15_000) return;
+  _lastTimerRefresh = now;
+  const seen = new Set();
+  for (const wave of WAVES) {
+    const timed = wave.targets.filter(t => t.timer);
+    if (!timed.length || seen.has(wave.url)) continue;
+    seen.add(wave.url);
+    const view = saveUserView();
+    setCookieRaw('show_dead_bosses_only', 0);
+    setHideDead(true);
+    const html = await getHtml(wave.url);
+    restoreUserView(view);
+    if (!html) continue;
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    _collectAutoSummon(doc);                         // S.timers (respawn ts)
+    const mobs = Object.values(_collectMobs(doc));
+    for (const t of timed) {
+      const a = mobs.find(m => !m.dead && t.match(m));   // alive matching boss
+      if (a) { const die = await fetchAutoDie(a.id); if (die) liveBoss[t.key] = die; }
+      else delete liveBoss[t.key];                        // dead → respawn branch (S.timers)
+    }
+  }
+}
+
+// ── COMBAT ────────────────────────────────────────────────────────────────────
+// idp = identity params: {monster_id} for waves, {dgmid, instance_id} for guild
+// dungeons. The attack tiers/skills and damage.php response are identical; only
+// the join/loot endpoints and the mob id differ (verified live).
+let _lat = 0;
+
+const isDungeon = idp => idp && idp.dgmid != null;
+
+async function join(idp) {
+  if (isDungeon(idp))
+    await post('dungeon_join_battle.php', { dgmid: idp.dgmid, instance_id: idp.instance_id, user_id: uid() });
+  else
+    await post('user_join_battle.php', { monster_id: idp.monster_id, user_id: uid() });
+}
+
+async function attack(idp, skillId = SKILL_ID, cost = SKILL_COST) {
+  const w = ATK_GAP - (Date.now() - _lat);
+  if (w > 0) await sleep(w);
+  const d = await post('damage.php', { ...idp, skill_id: skillId, stamina_cost: cost });
+  _lat = Date.now();
+  if (!d) return null;
+  const msg = d.message || '';
+  if (msg.includes('Slow down'))          { await sleep(1200); return null; }
+  if (/rejoin|removed due/i.test(msg))    { await join(idp);   return null; }
+  // death: server refuses the hit while we're dead → heal, then rejoin & retry next loop
+  if (/you are dead|you have died|you'?re dead/i.test(msg)) {
+    if (await healUp()) await join(idp);
+    return null;
+  }
+  if (msg.includes('Not enough stamina')) return null;
+  if (d.stamina !== undefined) stam = parseInt(d.stamina);
+  // track our HP from the boss retaliation; heal the instant it drops us to 0
+  const ret = d.retaliation || {};
+  if (ret.user_hp_after !== undefined) {
+    userHp = Math.max(0, parseInt(ret.user_hp_after) || 0);
+    if (userHp <= 0) { if (await healUp()) await join(idp); }
+  }
+  return d;
+}
+
+async function lootMob(idp) {
+  const d = isDungeon(idp)
+    ? await post('dungeon_loot.php', { dgmid: idp.dgmid, instance_id: idp.instance_id, user_id: uid() })
+    : await post('loot.php', { monster_id: idp.monster_id, user_id: uid() });
+  return d?.status === 'success' ? (d.rewards ?? {}) : null;
+}
+
+// ── EXACT-DAMAGE FIGHT (shared by waves + dungeons) ────────────────────────────
+// Reaches dmgTarget with minimal overshoot: pick the LARGEST tier whose expected
+// damage (tier.stam*K) does NOT overshoot the remaining gap; only the final 1-stam
+// hit crosses the line → overshoot ≤ one 1-stamina hit. K = dmg per stamina, learned
+// from the first reliable hit. knownStart=true when startDmg is the real prior total
+// (wave card userdmg); false for dungeons (we don't know it → learn K on hit #2).
+// Returns { dmg, reason: 'done'|'dead'|'cap'|'nostam'|'interrupt' }.
+const SMALLEST = SKILLS[SKILLS.length - 1];   // 1-stamina Slash
+const PROC_MAX_STAM = 50;                     // proc-farming caps hits at 50 stam (Heroic)
+
+async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false) {
+  await join(idp);
+  let dmg = startDmg, K = 0, stall = 0, measured = !!knownStart;
+  status = `→ ${label}`;
+
+  while (dmg < dmgTarget && !paused && running) {
+    await refreshTimers();   // keep boss death/respawn countdowns fresh during long fights
+    if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return { dmg, reason: 'interrupt' }; }
+
+    const remaining = dmgTarget - dmg;
+    // potion ONLY when truly out of stamina — never just to afford a bigger tier
+    // (that was the "pozione senza motivo"). With some stamina left we use the
+    // biggest tier we can already afford.
+    if (stam < 1) {
+      // CAP GUARD: se l'ultimo colpo non ha fatto danno (stall>0) il boss è al suo
+      // tetto per-giocatore. NON prendere una pozione per inseguire un target
+      // irraggiungibile: la sprecheresti (la stamina finirebbe poi sulla wave).
+      // Esci subito: i 5000 della pozione restano per il farm, non per colpi a vuoto.
+      if (stall > 0) {
+        log(`⛔ ${label}: cap reached at ${fmtDmg(dmg)} and out of stamina → leaving WITHOUT a potion`, '#fa0');
+        return { dmg, reason: 'cap' };
+      }
+      if (lsp === 'asNeeded' || lsp === 'once') await useLSP();
+      if (stam < 1) { log(`out of stamina on ${label} (${stam})`, '#fa0'); return { dmg, reason: 'nostam' }; }
+    }
+    // pick the attack tier:
+    //  • probe (K unknown) → 1 stam
+    //  • smallHits proc-farming → fixed medium hits ≤50 stam (Heroic), biggest
+    //    affordable; overshoot accepted (more Orryphos free-hit procs).
+    //  • EXACT (default, and forced for quests) → compose ONLY the 1/10/50-stam tiers
+    //    (Slash/Power/Heroic — NEVER 100/200/1000): the biggest of those that fits the
+    //    stamina AND won't overshoot the remaining gap, stepping 50→10→1 toward the
+    //    target so the final damage lands exactly on it (overshoot ≤ one 1-stam hit).
+    //    Capping at 50 (not 1000) ALSO maximises Orryphos procs: a 3B boss is ~154
+    //    Heroic hits = 154 proc chances, vs ~3 with the 1000-stam World Breaker.
+    let tier;
+    if (!K)                         tier = SMALLEST;
+    else if (S.smallHits && !exact) tier = SKILLS.find(s => s.stam <= PROC_MAX_STAM && s.stam <= stam) || SMALLEST;
+    else                            tier = SKILLS.find(s => s.stam <= PROC_MAX_STAM && s.stam <= stam && s.stam * K <= remaining) || SMALLEST;
+
+    const before = dmg;
+    const res = await attack(idp, tier.id, tier.stam);
+    if (!res) continue;
+    S.attacks++;
+    const msg = res.message || '';
+    if (msg.includes('Monster is already dead')) { log(`${label} already dead`, '#fa0'); return { dmg, reason: 'dead' }; }
+    const nd = parseInt(res.totaldmgdealt || '0');
+    if (nd > before) {
+      if (!K && measured) {                        // learn K from a hit with a real "before"
+        K = (nd - before) / tier.stam;
+        const est = Math.max(1, Math.ceil((dmgTarget - nd) / K));
+        log(`${label}: ${fmtDmg(Math.round(K))}/stam → ~${est} stam to target`, '#9cf');
+      }
+      measured = true;                             // after the first hit, "before" is real
+      dmg = nd;
+      stall = 0;
+    } else {
+      stall++;
+    }
+    log(`  ⚔ ${tier.stam}st sk${tier.id} · ${fmtDmg(before)}→${fmtDmg(nd)} (+${fmtDmg(nd - before)}) · K≈${fmtDmg(Math.round(K))}/st · stam=${stam}${stall ? ` · stall=${stall}` : ''} · msg="${msg.replace(/<[^>]+>/g, '').slice(0, 36)}"`, '#668');
+    if (stall >= 3) {
+      log(`⛔ ${label}: damage stuck at ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} (cap or undamageable) → moving on`, '#fa0');
+      return { dmg, reason: 'cap' };
+    }
+    status = `→ ${label} ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} ${stam}⚡`;
+    renderUI();
+  }
+  return { dmg, reason: 'done' };
+}
+
+// ── PROCESS WAVE ──────────────────────────────────────────────────────────────
+// targets: subset of wave.targets to process in this pass (timed OR farm).
+// Defaults to all targets (backwards-compatible).
+async function processWave(wave, targets = null, interruptible = false) {
+  targets = targets || wave.targets;
+  status = `fetch ${wave.id}…`;
+  renderUI();
+  // every target loots its dead instances — farm trash AND timed bosses (a killed
+  // boss sits dead until looted). Cache makes this ~1 dead-scan per wave / 30s.
+  const needDead = true;
+  const mobs = await fetchWave(wave.url, needDead);
+
+  const aliveN = mobs.filter(x => !x.dead).length;
+  const deadN  = mobs.filter(x => x.dead).length;
+  log(`${wave.id}: ${mobs.length} mobs (${aliveN} alive, ${deadN} dead) [${targets.map(t=>t.key).join('+')}]`, '#555');
+
+  // log mob matched per target (così vedi cosa trova)
+  for (const t of targets) {
+    const matched = mobs.filter(m => t.match(m));
+    const aliveM  = matched.filter(m => !m.dead);
+    if (matched.length) {
+      log(`  [${t.key}] ${matched.length} match, ${aliveM.length} alive: ${aliveM.slice(0,6).map(m=>`${m.name}(${fmtDmg(m.userdmg)})`).join(', ')}${aliveM.length>6?'…':''}`, '#888');
+    } else {
+      log(`  [${t.key}] no match`, '#444');
+    }
+    // the alive boss's REAL death countdown comes from its battle page (auto-die),
+    // not data-expire — refreshTimers() fetches it. Here we just clear it when dead.
+    if (t.timer && !aliveM.length) delete liveBoss[t.key];
+  }
+
+  // loot dead mobs matching this pass's targets (timers come from auto-summon cards)
+  for (const m of mobs.filter(x => x.dead)) {
+    for (const t of targets) {
+      if (!t.match(m)) continue;
+      if (!t.timer && isTimedName(m.name)) continue;   // farm never claims a timed boss
+      const r = await lootMob({ monster_id: m.id });
+      if (r !== null) {
+        if (t.killLimit !== null) {
+          S.kills[m.name] = (S.kills[m.name] || 0) + 1;
+          log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}`, '#2f8');
+        } else {
+          log(`loot ✓ ${m.name}`, '#2f8');
+        }
+      }
+    }
+  }
+  save();
+
+  // attack alive targets
+  for (const t of targets) {
+    if (paused || !running) break;
+
+    const alive = mobs.filter(m =>
+      !m.dead &&
+      t.match(m) &&
+      (t.timer || !isTimedName(m.name)) &&        // farm never attacks a timed boss
+      m.userdmg < t.dmgTarget &&
+      (t.killLimit === null || (S.kills[m.name] || 0) < t.killLimit)
+    );
+
+    for (const mob of alive) {
+      if (paused || !running) break;
+      // before starting a farm mob, give timed bosses a chance
+      if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return; }
+
+      if (t.useLSP === 'once') await useLSP();
+      if (stam < 1) {
+        if (t.useLSP === 'asNeeded' || t.useLSP === 'once') await useLSP();
+        // niente stamina e niente pozione utilizzabile: tutti i mob restanti di
+        // questo target richiedono stamina → inutile provarli a uno a uno (era lo
+        // spam "no stam — skip" ×42/ciclo). Esci dal target.
+        if (stam < 1) { log(`no stamina — stop ${t.key} (${alive.length} mobs waiting for stamina)`, '#fa0'); break; }
+      }
+
+      log(`→ ${mob.name} (${fmtDmg(mob.userdmg)} / ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
+      const { dmg, reason } = await fightTarget(
+        { monster_id: mob.id }, mob.name, mob.userdmg, t.dmgTarget, t.useLSP, interruptible, true, !!t.exact);
+      if (reason === 'interrupt') return;             // a timed boss respawned → bail to phase 1
+      if (dmg >= t.dmgTarget) {
+        const over = dmg - t.dmgTarget;   // residuo oltre il target (≤ 1 colpo da 1 stam)
+        if (t.timer) {
+          S.timedKills++;
+          S.timedBy[t.key] = (S.timedBy[t.key] || 0) + 1;
+          log(`✓ TIMED #${S.timedKills} — ${mob.name} ${fmtDmg(dmg)} (+${fmtDmg(over)} over ${fmtDmg(t.dmgTarget)})`, '#2f8');
+        } else {
+          log(`✓ ${mob.name} — ${fmtDmg(dmg)} (+${fmtDmg(over)} over)`, '#2f8');
+        }
+      }
+      save();
+    }
+  }
+}
+
+// ── PROCESS DUNGEON (guild dungeon boss on battle.php?dgmid=…&instance_id=…) ────
+// One boss per source: join → exact-damage to the configured dmgTarget → loot.
+async function processDungeon(src) {
+  const t = (src.targets || [])[0];
+  if (!t || t.enabled === false) return;
+  if (stam < 1) {
+    if (t.useLSP) await useLSP();
+    if (stam < 1) { log(`no stamina — skip dungeon ${src.label}`, '#fa0'); return; }
+  }
+  const idp = { dgmid: src.dgmid, instance_id: src.instance_id };
+  log(`→ 🏰 dungeon ${src.label} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
+  // startDmg 0 + knownStart=false → fightTarget learns K on hit #2 (we don't know
+  // our prior cumulative damage on this boss; totaldmgdealt gives the real total).
+  const { dmg, reason } = await fightTarget(idp, src.label, 0, t.dmgTarget, t.useLSP, false, false);
+  if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
+    const r = await lootMob(idp);
+    log(`${reason === 'dead' ? '☠️' : '✓'} dungeon ${src.label} — ${fmtDmg(dmg)}${r ? ' · loot ✓' : ''}`, '#2f8');
+  }
+  save();
+}
+
+// ── PROCESS GUILD DUNGEON LOCATION (many .mon instances on one location page) ──
+// Instances respawn with NEW dgmids, so we can't hardcode them: each pass we re-read
+// the location page, loot the dead matching instances, then fight each alive matching
+// instance (its CURRENT dgmid) to the target's dmgTarget. Matches by monster NAME
+// (include/exclude) exactly like a wave — one source can target several monster types.
+async function processDungeonLocation(src) {
+  const targets = (src.targets || []).filter(t => t.enabled !== false);
+  if (!targets.length) return;
+
+  // throttle the page read (12s): when everything is dead this would otherwise re-fetch
+  // ~twice a second (the main loop only sleeps 600ms while stamina is left) and hammer
+  // the server. While cached we just skip the pass.
+  const now = Date.now();
+  const hit = _dlCache[src.id];
+  let mons;
+  if (hit && now - hit.ts < 12_000) {
+    mons = hit.mons;
+  } else {
+    status = `fetch 🏰 ${src.label}…`; renderUI();
+    const html = await getHtml(srcUrl(src));
+    if (!html) return;
+    parseStam(html);
+    mons = parseDungeonMons(html);
+    _dlCache[src.id] = { ts: Date.now(), mons };
+    const aliveN = mons.filter(m => !m.dead).length;
+    log(`🏰 ${src.label}: ${mons.length} instances (${aliveN} alive) [${targets.map(t => t.key).join('+')}]`, '#558');
+  }
+  const matched = targets.map(t => ({ t, fn: makeMatch(t.include, t.exclude) }));
+
+  // loot dead matching instances — ONCE per dgmid (a looted instance keeps showing
+  // until it respawns with a NEW dgmid, so the set never blocks a fresh kill).
+  for (const m of mons.filter(x => x.dead)) {
+    if (_dlLooted.has(m.dgmid)) continue;
+    for (const { t, fn } of matched) {
+      if (!fn(m)) continue;
+      const r = await lootMob({ dgmid: m.dgmid, instance_id: m.instance_id });
+      _dlLooted.add(m.dgmid);
+      if (r !== null && t.killLimit !== null) {
+        S.kills[m.name] = (S.kills[m.name] || 0) + 1;
+        log(`loot ✓ 🏰 ${m.name} — kill #${S.kills[m.name]}`, '#2f8');
+      }
+      break;   // one target claims it
+    }
+  }
+  save();
+
+  // fight alive matching instances
+  for (const { t, fn } of matched) {
+    if (paused || !running) break;
+    const alive = mons.filter(m => !m.dead && fn(m) &&
+      (t.killLimit === null || (S.kills[m.name] || 0) < t.killLimit));
+    for (const m of alive) {
+      if (paused || !running) break;
+      if (stam < 1) {
+        if (t.useLSP) await useLSP();
+        if (stam < 1) { log(`no stamina — stop 🏰 ${t.key}`, '#fa0'); return; }
+      }
+      log(`→ 🏰 ${m.name} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
+      const idp = { dgmid: m.dgmid, instance_id: m.instance_id };
+      const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact);
+      if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
+        const r = await lootMob(idp);
+        _dlLooted.add(m.dgmid);
+        if (r !== null && t.killLimit !== null) S.kills[m.name] = (S.kills[m.name] || 0) + 1;
+        delete _dlCache[src.id];   // state changed → re-read the page next pass
+        log(`✓ 🏰 ${m.name} — ${fmtDmg(dmg)}`, '#2f8');
+      }
+      save();
+    }
+  }
+}
+
+// ── ADVENTURER'S GUILD QUESTS ──────────────────────────────────────────────────
+// All quests target g5w9 mobs (verified): "Kill 10 <monster> · min 5m dmg" or
+// "Gather Nx <item>". Endpoints (verified from the page's own JS):
+//   accept : POST /adventurers_accept_quest.php {quest_id} → {status:'ok'}
+//   finish : POST /adventurers_finish_quest.php {quest_id} → ok only if objective met
+//   giveup : POST /adventurers_giveup_quest.php {quest_id}
+// Rules: ONE active quest at a time; a finished quest goes on a 2-day rotation
+// cooldown (its row then loses the accept button → we just pick another available
+// one). Flow per cycle: finish if complete → accept next available → farm its mob
+// on g5w9 to ≥minDmg each (server counts the kill when the mob dies with our hit).
+const GUILD_URL  = `${BASE}/adventurers_guild.php`;
+const QUEST_WAVE = `${BASE}/active_wave.php?gate=5&wave=9`;
+const QUEST_DMG  = 5_000_000;            // default min damage per mob (quests ask ≥3–5m)
+const QUEST_INTERVAL = 20_000;           // how often we re-read the guild page
+let _lastQuest = 0;
+let _questCooldowns = [];                 // [{title, ts}] cooldown quests tracked for the UI
+
+const _qid = el => parseInt((el.getAttribute('onclick') || '').match(/\((\d+)/)?.[1] || '0');
+
+// the monster a quest targets: req-text "Monster: X" → desc "Kill N X while …" →
+// "from (a) defeated X". null = unknown → farm ALL g5w9 mobs (covers gather quests).
+function questMonster(row) {
+  const req = row.querySelector('.quest-req-text')?.textContent || '';
+  let m = req.match(/Monster:\s*([^·\n]+?)\s*(?:·|$)/i);
+  if (m) return m[1].trim().toLowerCase();
+  const desc = row.querySelector('.quest-main-desc')?.textContent || '';
+  m = desc.match(/Kill\s+\d+\s+(.+?)\s+while dealing/i);
+  if (m) return m[1].trim().toLowerCase();
+  m = desc.match(/from (?:a )?defeated\s+([A-Za-z' ]+?)(?:[.,]|\s+so\b|$)/i);
+  if (m) return m[1].trim().toLowerCase();
+  return null;
+}
+function questMinDmg(row) {
+  const m = (row.querySelector('.quest-req-text')?.textContent || '').match(/min\s*([\d,]+)\s*dmg/i);
+  const n = m ? parseInt(m[1].replace(/,/g, '')) : 0;
+  return n > 0 ? n : QUEST_DMG;
+}
+
+// the single active quest (row carrying give-up/finish controls), or null
+function parseActiveQuest(doc) {
+  for (const row of doc.querySelectorAll('.quest-row')) {
+    const fin = row.querySelector('[onclick*="finishQuest"]');
+    const giv = row.querySelector('[onclick*="giveUpQuest"]');
+    if (!fin && !giv) continue;
+    const pm   = (row.querySelector('.quest-progress')?.textContent || '').match(/([\d,]+)\s*\/\s*([\d,]+)/);
+    const have = pm ? parseInt(pm[1].replace(/,/g, '')) : 0;
+    const need = pm ? parseInt(pm[2].replace(/,/g, '')) : 10;
+    return {
+      id: _qid(fin || giv), have, need,
+      finishable: !!fin || (need > 0 && have >= need),
+      monster: questMonster(row), minDmg: questMinDmg(row),
+      title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
+    };
+  }
+  return null;
+}
+
+// quests we can accept right now (accept button present, not on 2-day cooldown,
+// charges remaining). Cooldown rows replace the button with a data-cooldown-ts
+// countdown → they have no accept button, so they're skipped naturally.
+function parseAvailableQuests(doc) {
+  const out = [], now = Math.floor(Date.now() / 1000);
+  for (const row of doc.querySelectorAll('.quest-row')) {
+    const acc = row.querySelector('[onclick*="acceptQuest"]');
+    if (!acc) continue;
+    const cdEl = row.querySelector('[data-cooldown-ts]');
+    if (cdEl && parseInt(cdEl.getAttribute('data-cooldown-ts') || '0') > now) continue;
+    const lim = row.textContent.match(/(\d+)\s*\/\s*\d+\s*remaining/i);
+    if (lim && parseInt(lim[1]) <= 0) continue;
+    out.push({
+      id: _qid(acc), monster: questMonster(row), minDmg: questMinDmg(row),
+      title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
+    });
+  }
+  return out;
+}
+
+// quests currently on the 2-day cooldown rotation (no accept button, future
+// data-cooldown-ts) → tracked so the UI can show when each frees up again.
+function parseQuestCooldowns(doc) {
+  const out = [], now = Math.floor(Date.now() / 1000);
+  for (const row of doc.querySelectorAll('.quest-row')) {
+    const cdEl = row.querySelector('[data-cooldown-ts]');
+    if (!cdEl) continue;
+    const ts = parseInt(cdEl.getAttribute('data-cooldown-ts') || '0');
+    if (ts <= now) continue;   // already off cooldown → it'll be in "available"
+    out.push({ title: (row.querySelector('.quest-main-title')?.textContent || 'quest').trim(), ts });
+  }
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
+async function fetchGuild() {
+  const html = await getHtml(GUILD_URL);
+  return html ? new DOMParser().parseFromString(html, 'text/html') : null;
+}
+
+// a transient farm wave for the active quest's monster on g5w9. Unknown monster →
+// empty include = match ALL g5w9 mobs (so gather quests still progress). Core token
+// only (split on comma) so "Charybdis, Living Maelstrom" matches via "charybdis".
+function questWaveFor(q) {
+  const dmg = Math.round((q.minDmg || QUEST_DMG) * 1.02);   // tiny margin over the floor
+  const inc = q.monster ? [q.monster.split(',')[0].trim()] : [];
+  return {
+    id: 'quest', label: `Quest: ${q.title}`, url: QUEST_WAVE,
+    targets: [{
+      key: 'quest', label: q.monster || 'quest mobs', srcName: 'quest',
+      match: makeMatch(inc, []), dmgTarget: dmg, exact: true,
+      killLimit: null, useLSP: 'asNeeded', timer: false, enabled: true,
+    }],
+  };
+}
+
+// Drive the Adventurer's Guild "di seguito": finish a completed quest → accept the
+// next available one (only ONE at a time) → farm its mob to the server target → on
+// the next read finish it and accept the next, and so on. Cooldown quests are just
+// tracked for the UI. The guild page is re-read at most every QUEST_INTERVAL; between
+// reads we keep farming the cached active quest's mob (LSP refills the stamina).
+//
+// Returns TRUE while there is still quest work pending → the main loop then SKIPS the
+// general farm waves, so stamina is spent ONLY on the quest (refilled with LSP) and
+// never wasted on the waves. Returns FALSE only when nothing is left to do right now
+// (no active quest and everything else on cooldown).
+async function processQuests() {
+  if (!S.questEnabled) return false;
+
+  if (Date.now() - _lastQuest > QUEST_INTERVAL) {
+    _lastQuest = Date.now();
+    const doc = await fetchGuild();
+    if (doc) {
+      _questCooldowns = parseQuestCooldowns(doc);
+      let active = parseActiveQuest(doc);
+
+      // 1) finish a completed quest → frees the single active slot
+      if (active && active.finishable) {
+        const r = await post('adventurers_finish_quest.php', { quest_id: active.id });
+        if (r && r.status === 'ok') { S.questDone++; log(`🏅 quest done: ${active.title} (${active.have}/${active.need})`, '#2f8'); }
+        else log(`quest finish failed (${active.title}): ${r?.message || 'no resp'}`, '#f66');
+        active = null;
+      }
+
+      // 2) no active quest → accept the next available (off cooldown), then farm it
+      if (!active) {
+        const avail = parseAvailableQuests(doc);
+        if (avail.length) {
+          const p = avail[0];
+          const r = await post('adventurers_accept_quest.php', { quest_id: p.id });
+          if (r && r.status === 'ok') {
+            S.questTaken++;
+            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, have: 0, need: 10 };
+            log(`📜 quest accepted: ${p.title}${p.monster ? ` → ${p.monster}` : ''} (min ${fmtDmg(p.minDmg)})`, '#9cf');
+          } else log(`quest accept failed (${p.title}): ${r?.message || 'no resp'}`, '#f66');
+        } else {
+          log(`quests: none available · ${_questCooldowns.length} on cooldown`, '#778');
+        }
+      }
+
+      S.questActive = active;   // cache for the UI + the farm pass below
+      save();
+    }
+  }
+
+  // farm the active quest's mob (interruptible: timed bosses keep priority). Report
+  // "pending" so the caller skips the waves until the quest slot is empty.
+  const q = S.questActive;
+  if (q && (q.have || 0) < (q.need || 10)) {
+    status = `📜 quest: ${q.title}`;
+    await processWave(questWaveFor(q), null, true);
+    return true;
+  }
+  // an active-but-finishable quest is turned in on the next read → still pending
+  return !!(q && q.finishable);
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
+// Pass 1: timed bosses across ALL waves (high priority, with LSP).
+// Pass 2: farm mobs across ALL waves (use remaining stamina).
+// fetchWave has a 30s cache so each wave is only fetched once per cycle.
+async function mainLoop() {
+  readStamFromDOM();
+  let invLoaded = false;
+  while (running) {
+    // PAUSED = fully idle: no fetch, no cookie writes, nothing — so you can drink
+    // potions / fight bosses / play MANUALLY without the bot interfering. The pause
+    // state is persisted (S.paused), so a page reload (e.g. after a potion) stays
+    // paused instead of silently resuming.
+    if (paused) { status = '⏸ paused — manual play'; await sleep(600); renderUI(); continue; }
+    if (!invLoaded) { await refreshInv(); invLoaded = true; }
+    try {
+      await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
+      // Phase 0 — guild dungeon bosses (battle.php?dgmid) — single boss per source
+      for (const src of (S.config || [])) {
+        if (paused || !running) break;
+        if (src.kind === 'dungeon'    && src.enabled !== false) await processDungeon(src);
+        if (src.kind === 'dungeonloc' && src.enabled !== false) await processDungeonLocation(src);
+      }
+      // Phase 1 — timed bosses (priorità assoluta, usano stamina poi pozione)
+      for (const wave of WAVES) {
+        if (paused || !running) break;
+        const timedTargets = wave.targets.filter(t => t.timer);
+        if (timedTargets.length) await processWave(wave, timedTargets);
+      }
+      // Phase 1.5 — Adventurer's Guild quests (accept → farm to target → finish → next,
+      // consecutively). While a quest is pending it OWNS the stamina (LSP refills it).
+      let questPending = false;
+      if (!paused && running) questPending = await processQuests();
+      // Phase 2 — general farm mobs (stamina rimanente, interrompibili dai timed).
+      // SKIPPED while a quest is pending → "non sprecare stamina per le waves": the
+      // stamina stays reserved for the quest, topped up with LSP, until it's turned in.
+      _timedInterrupt = false;
+      if (!questPending) for (const wave of WAVES) {
+        if (paused || !running || _timedInterrupt) break;
+        const farmTargets = wave.targets.filter(t => !t.timer);
+        if (farmTargets.length) await processWave(wave, farmTargets, true);
+      }
+    } catch (e) {
+      console.error('[FarmBot]', e);
+      log(`error: ${e.message}`, '#f66');
+      status = 'error — retry…';
+    }
+    renderUI();
+    // Backoff: a stamina 0 non c'è nulla da fare finché non rigenera (i farm non
+    // usano pozioni, i timed sono già al target). Dormi a lungo invece di rifare
+    // il giro ~2 volte al secondo spammando il log. Il cache wave (30s) scade nel
+    // frattempo, così al risveglio rilegge stamina/boss freschi.
+    await sleep(stam < SKILL_COST ? 60_000 : 600);
+  }
+}
+
+// ── UI HELPERS ────────────────────────────────────────────────────────────────
+function fmt(ms) {
+  const s = Math.floor(Math.abs(ms) / 1000);
+  const m = Math.floor(s / 60), h = Math.floor(m / 60);
+  return h ? `${h}h ${m%60}m` : `${m}m ${s%60}s`;
+}
+
+function fmtDmg(n) {
+  if (n >= 1_000_000_000) return `${(n/1e9).toFixed(1)}B`;
+  if (n >= 1_000_000)     return `${(n/1e6).toFixed(1)}M`;
+  if (n >= 1_000)         return `${(n/1e3).toFixed(0)}K`;
+  return String(n);
+}
+
+function bar(n, max, w = 14) {
+  const f = Math.min(Math.round(n / max * w), w);
+  return '█'.repeat(f) + '░'.repeat(w - f);
+}
+
+// ── RENDER ────────────────────────────────────────────────────────────────────
+let uiContent, uiPanel, minimized = S.minimized === true, activeTab = 'status';
+
+function renderStatus() {
+  const now    = Date.now();
+  const sc     = paused ? '#fa0' : '#2f8';
+  const st     = paused ? '⏸ PAUSED' : `▶ ${status}`;
+  const totalK = Object.values(S.kills).reduce((a,b) => a+b, 0);
+
+  // compact stat grid (2 columns) — più info, font leggermente più grande
+  const stat = (ic, val, lbl, col = '#cfe') =>
+    `<div style="display:flex;align-items:baseline;gap:5px">
+       <span style="font-size:13px">${ic}</span>
+       <b style="color:${col};font-size:13px">${val}</b>
+       <span style="color:#667;font-size:11px">${lbl}</span>
+     </div>`;
+  const potStock = STAM_POTS.map(p => `${p.name} ${S.potInv?.[p.item]?.qty ?? '?'}`).join('/');
+  const potNone  = !pickPotion();
+  let h = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:7px">
+      ${stat('⚡', stam.toLocaleString(), 'stamina', stam > 0 ? '#0cf' : '#f66')}
+      ${stat('⏱', fmt(now - S.started), 'uptime')}
+      ${stat('💀', totalK.toLocaleString(), 'farm kills')}
+      ${stat('👑', S.timedKills.toLocaleString(), 'boss kills', '#f90')}
+      ${stat('🧪', potStock, 'pots left' + (potNone ? ' ⚠' : ''), potNone ? '#f66' : '#cfe')}
+      ${stat('❤️', S.hpHeals.toLocaleString(), 'heals' + (hpEmpty ? ' (0!)' : ''), hpEmpty ? '#f66' : '#cfe')}
+      ${stat('🩸', userHp == null ? '—' : fmtDmg(userHp), 'HP')}
+    </div>
+    <div style="color:${sc};font-size:12px;margin:2px 0 8px;overflow:hidden;
+      text-overflow:ellipsis;white-space:nowrap">${paused ? '⏸ PAUSED' : '▶ '}${esc(status)}</div>
+  `;
+
+  // boss timers — iterate the bosses we actually target.
+  // alive  → real auto-die countdown from data-expire (liveBoss).
+  // dead   → respawn countdown from the auto-summon next-ts (S.timers, name match).
+  const timedTargets = WAVES.flatMap(w => w.targets.filter(t => t.timer));
+  if (timedTargets.length) {
+    h += `<div style="color:#f90;font-size:12px;font-weight:bold;margin-bottom:5px">⏰ Boss timers <span style="color:#666;font-weight:normal">· ${S.timedKills} done</span></div>`;
+    for (const t of timedTargets) {
+      const exp  = liveBoss[t.key];                                 // alive auto-die ts (s)
+      const tm   = Object.entries(S.timers).find(([nm, v]) => v && t.match({ name: nm }));
+      const done = S.timedBy[t.key] || 0;
+      let info;
+      if (exp) {
+        info = `<span style="color:#2f8">✅ alive · dies in ${fmt(exp * 1000 - now)}</span>`;
+      } else if (tm && tm[1].nextTs) {
+        const left = tm[1].nextTs * 1000 - now;
+        info = left > 0
+          ? `<span style="color:#ff6">⟳ respawn in ${fmt(left)}</span>`
+          : `<span style="color:#2f8">✅ ready!</span>`;
+      } else {
+        info = `<span style="color:#777">… waiting for data</span>`;
+      }
+      const short = t.label.length > 28 ? t.label.slice(0,28)+'…' : t.label;
+      h += `<div style="font-size:12px;margin-bottom:4px;color:#fab">
+        ${short} ${done ? `<span style="color:#2f8;font-size:11px">×${done}</span>` : ''}
+        <br>&nbsp;&nbsp;→ ${info}</div>`;
+    }
+    h += `<div style="border-top:1px solid #2a2a44;margin:7px 0"></div>`;
+  }
+
+  // adventurer's guild quests — active quest + accepted/done counters
+  if (S.questEnabled) {
+    const q = S.questActive;
+    h += `<div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:5px">📜 Quests
+      <span style="color:#666;font-weight:normal">· ${S.questDone} done · ${S.questTaken} taken</span></div>`;
+    if (q) {
+      const short = (q.title || '').length > 26 ? q.title.slice(0,26)+'…' : (q.title || 'quest');
+      h += `<div style="font-size:12px;margin-bottom:4px;color:#cfa">
+        ${esc(short)}<br>&nbsp;&nbsp;→ <span style="color:#7df">${esc(q.monster || 'g5w9 mobs')}</span>
+        <span style="color:#9c6"> ${q.have ?? 0}/${q.need ?? 10}</span></div>`;
+    } else {
+      h += `<div style="font-size:12px;margin-bottom:4px;color:#777">… all on cooldown (2-day rotation)</div>`;
+    }
+    h += `<div style="border-top:1px solid #2a2a44;margin:7px 0"></div>`;
+  }
+
+  // farm progress — limit per mob comes from its matching farm target (no hardcode)
+  const limitForName = (name) => {
+    for (const w of WAVES) for (const t of w.targets)
+      if (t.killLimit != null && t.match({ name })) return t.killLimit;
+    return null;
+  };
+  // only NORMAL farm mobs here — timed bosses live in the ⏰ Boss timers block above
+  const killRows = Object.entries(S.kills).filter(([name]) => !isTimedName(name));
+  if (killRows.length) {
+    h += `<div style="color:#0af;font-size:12px;font-weight:bold;margin-bottom:5px">🎯 Farming</div>`;
+    for (const [name, k] of killRows.sort()) {
+      const lim   = limitForName(name);
+      const done  = lim != null && k >= lim;
+      const color = done ? '#2f8' : (k > 0 ? '#fa0' : '#555');
+      const short = name.length > 20 ? name.slice(0,20)+'…' : name;
+      const prog  = lim != null
+        ? `<span style="color:#333"> ${bar(Math.min(k,lim),lim,12)}</span><span style="color:${color}"> ${k}/${lim}${done?' ✓':''}</span>`
+        : `<span style="color:${color}"> ×${k}</span>`;
+      h += `<div style="font-size:12px;margin-bottom:4px">
+        <span style="color:#7df">${short}</span>${prog}
+      </div>`;
+    }
+  }
+
+  return h;
+}
+
+function renderLog() {
+  if (!logBuf.length) return `<div style="color:#444;font-size:11px">no log yet</div>`;
+  return logBuf.slice().reverse().map(e =>
+    `<div style="font-size:11px;margin-bottom:3px;line-height:1.5;word-break:break-word">
+      <span style="color:#555">${e.ts}</span>
+      <span style="color:${e.color}"> ${e.msg}</span>
+    </div>`
+  ).join('');
+}
+
+// ── SETTINGS TAB ──────────────────────────────────────────────────────────────
+// "Scan questa pagina" reads the live DOM of whatever page you're on and lists
+// its mobs; you tick the ones to hit, set danno + ⏰timed/🎯farm, ✕ to remove.
+// Sources are grouped by page (any URL). The 2s auto-render skips this tab so
+// typing/focus isn't lost; "💾" persists + rebuilds the runtime WAVES.
+const _scan = {};   // source.id → [{name, count, boss}] from the last live scan
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+
+const IN = 'background:#0c0c16;border:1px solid #2b2e49;border-radius:4px;color:#dfe6ff;font:11px monospace;padding:2px 4px';
+
+// parse "3m" / "120k" / "50000000" → integer (null = invalid → keep old value)
+function parseAmount(s) {
+  s = String(s).trim().toLowerCase().replace(/[, _]/g, '');
+  const m = s.match(/^([\d.]+)([kmbg]?)$/);   // b/g = miliardi (1e9)
+  if (!m) return null;
+  let n = parseFloat(m[1]); if (isNaN(n)) return null;
+  if      (m[2] === 'k')                  n *= 1e3;
+  else if (m[2] === 'm')                  n *= 1e6;
+  else if (m[2] === 'b' || m[2] === 'g')  n *= 1e9;
+  return Math.round(n);
+}
+
+// build a runtime target from a scanned mob name. srcName links the checklist row
+// back to the target; include is the core token so it still matches if the boss's
+// full title shifts. LSP + timer are derived (boss/timed → auto LSP, farm → none).
+function mkTarget(name, boss) {
+  return {
+    key: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    label: name, srcName: name,
+    include: [name.split(',')[0].trim()], exclude: [],
+    dmgTarget: boss ? 3_000_000 : 100_000_000,   // farm: 100M/mob (drop threshold)
+    killLimit: boss ? null : 400,
+    useLSP: boss ? 'asNeeded' : false,
+    timer: !!boss, enabled: true,
+  };
+}
+
+// which saved target (if any) a checklist row maps to (case-insensitive — the row
+// name may be a mixed-case label while include tokens are lowercase)
+function targetFor(w, name) {
+  const ln = String(name).toLowerCase();
+  return (w.targets || []).find(t => (t.srcName || '').toLowerCase() === ln)
+      || (w.targets || []).find(t => (t.label || '').toLowerCase() === ln)   // exclude-only farm targets have empty include + no srcName → match by label
+      || (w.targets || []).find(t => (t.include || []).some(tok => tok && ln.includes(String(tok).toLowerCase())));
+}
+
+// current page URL, normalised (no hash, no dead_page) — the key for a source
+function currentPageUrl() {
+  const u = new URL(location.href);
+  u.hash = ''; u.searchParams.delete('dead_page');
+  return u.toString();
+}
+
+// Scan the LIVE page the user is on (any URL: wave, event, gate, guild dungeon).
+// Reads document directly → no fetch, no cookie race. Creates/refreshes the
+// matching source in S.config and stores its mob checklist in _scan[source.id].
+async function scanCurrentPage(btn) {
+  if (btn) btn.textContent = '⏳';
+  const url = currentPageUrl();
+
+  // ── GUILD DUNGEON boss page: battle.php?dgmid=…&instance_id=… ──
+  // One boss per page (.battle-card.monster-card). Create a 'dungeon' source the
+  // main loop fights via dungeon_join_battle/damage/dungeon_loot (id = dgmid+instance).
+  const pu = new URL(location.href);
+  const dgmid = pu.searchParams.get('dgmid');
+  const instId = pu.searchParams.get('instance_id');
+  if (dgmid && pu.pathname.includes('battle.php')) {
+    const card = document.querySelector('.battle-card.monster-card, .monster-card');
+    const bossName = (card?.querySelector('.card-title')?.textContent
+                   || card?.dataset?.name || document.title || `Dungeon boss ${dgmid}`)
+                   .replace(/[🧟👑⚔️🎁\s]+/g, ' ').trim() || `Dungeon boss ${dgmid}`;
+    let src = S.config.find(w => w.kind === 'dungeon' && String(w.dgmid) === String(dgmid)
+                              && String(w.instance_id) === String(instId));
+    if (src) { src.url = url; src.label = bossName; }      // refresh (dgmid may be re-scanned)
+    else {
+      src = {
+        id: 'd' + Date.now().toString(36), url, label: bossName, kind: 'dungeon',
+        dgmid, instance_id: instId, enabled: true,
+        targets: [{ key: 'boss', label: bossName, srcName: bossName, include: [], exclude: [],
+                    dmgTarget: 100_000_000, killLimit: null, useLSP: 'asNeeded',
+                    timer: false, enabled: true, dungeon: true }],
+      };
+      S.config.push(src);
+    }
+    save();
+    log(`🏰 dungeon added: ${bossName} (dgmid ${dgmid}) — set the damage and press 💾`, '#9060ff');
+    renderSettings();
+    return;
+  }
+
+  // ── GUILD DUNGEON LOCATION page: guild_dungeon_location.php?instance_id=…&location_id=… ──
+  // Many .mon instances (each its own dgmid). We farm by MONSTER NAME because instances
+  // respawn with new dgmids, so the source stores the location URL + a name checklist and
+  // the loop re-reads the page each pass. Lists DEAD instances too, so you can add them
+  // while everything is dead / on cooldown (the user's exact case).
+  if (pu.pathname.includes('guild_dungeon_location.php')) {
+    let mons = _collectDungeonMons(document);
+    if (!mons.length) {                       // not in the live DOM → fetch the page
+      const html = await getHtml(url);
+      if (html) mons = parseDungeonMons(html);
+    }
+    const instId2 = pu.searchParams.get('instance_id');
+    const locId   = pu.searchParams.get('location_id');
+    let src = S.config.find(w => w.kind === 'dungeonloc' && srcUrl(w) === url);
+    if (!src) {
+      src = {
+        id: 'dl' + Date.now().toString(36), kind: 'dungeonloc', url,
+        instance_id: instId2, location_id: locId,
+        label: (document.title || 'Guild dungeon').replace(/\s*[—\-|·].*$/, '').trim() || pageLabel(url),
+        enabled: true, targets: [],
+      };
+      S.config.push(src);
+    } else { src.url = url; src.instance_id = instId2; src.location_id = locId; }
+
+    const distinct = {};
+    for (const m of mons) {
+      const nm = m.name || '?';
+      distinct[nm] = distinct[nm] || { total: 0, dead: 0 };
+      distinct[nm].total++; if (m.dead) distinct[nm].dead++;
+    }
+    // boss:false → mkTarget builds a FARM-style target (no potions, kill counter); the
+    // user can flip any to ⏰ Timed (potions) from the checklist if they want.
+    const list = Object.entries(distinct)
+      .map(([name, c]) => ({ name, count: c.total, boss: false }))
+      .sort((a, b) => b.count - a.count);
+    _scan[src.id] = list;
+    save();
+    log(`🏰 location ${src.label}: ${list.length} monster types (${mons.length} instances${mons.length && mons.every(m=>m.dead) ? ', all dead now' : ''}) — tick them, set damage, press 💾`, '#9060ff');
+    renderSettings();
+    return;
+  }
+
+  // Need the ALIVE view. If the live page already shows alive monster-cards
+  // (user is in the alive view) read them directly; otherwise the page is in
+  // the dead/unclaimed view (cookie=0) → fetch the alive view (cookie=1) so we
+  // actually see the live mobs. (fetch carries the cookie set in this same tick,
+  // so there's no race with the main loop.)
+  let alive = Object.values(_collectMobs(document)).filter(m => !m.dead);
+  if (alive.length) {
+    _collectAutoSummon(document);
+  } else {
+    const view = saveUserView();
+    setCookieRaw('show_dead_bosses_only', 0);
+    setHideDead(true);
+    const html = await getHtml(url);
+    restoreUserView(view);
+    if (html) {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      _collectAutoSummon(doc);
+      alive = Object.values(_collectMobs(doc)).filter(m => !m.dead);
+    }
+  }
+
+  const bossNames = Object.keys(S.timers);
+  const distinct = {};
+  for (const m of alive) distinct[m.name] = (distinct[m.name] || 0) + 1;
+  const list = Object.entries(distinct).map(([name, count]) => ({
+    name, count,
+    boss: bossNames.some(bn => bn.split(',')[0] && name.includes(bn.split(',')[0]))
+        || /general|king|titan|herald|hunter|emperor|lord|queen|god|eternal/i.test(name),
+  })).sort((a, b) => (b.boss - a.boss) || (b.count - a.count));
+
+  let src = S.config.find(w => srcUrl(w) === url);
+  if (!src && !list.length) {
+    log('⚠ no alive mobs here. Waves sometimes only show bosses (trash not spawned yet). Guild dungeons use a different system (open the boss battle page and scan that).', '#f66');
+    renderSettings();
+    return;
+  }
+  if (!src) {
+    src = { id: 's' + Date.now().toString(36), url, label: pageLabel(url), enabled: true, targets: [] };
+    S.config.push(src);
+  }
+  _scan[src.id] = list;
+  save();
+  log(`⚙ scan ${src.label}: ${list.length} alive mobs`, '#9060ff');
+  renderSettings();
+}
+
+function renderSettings() {
+  if (!uiContent) return;
+  const curUrl = currentPageUrl();
+  const sectionTitle = (txt) =>
+    `<div style="color:#9cf;font-size:11px;font-weight:bold;text-transform:uppercase;
+      letter-spacing:.5px;margin:10px 0 6px">${txt}</div>`;
+  const toggleRow = (act, on, title, onTxt, offTxt) =>
+    `<label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer;
+      font-size:11px;background:#10101c;border:1px solid ${on?'#2a4a35':'#3a3144'};border-radius:6px;padding:7px 8px">
+      <input type="checkbox" data-act="${act}" ${on?'checked':''} style="transform:scale(1.2)">
+      <span style="flex:1">
+        <span style="color:#dfe6ff">${title}</span><br>
+        <span style="color:#667;font-size:10px">${on?onTxt:offTxt}</span>
+      </span>
+      <span style="color:${on?'#2f8':'#777'};font-weight:bold;font-size:11px">${on?'ON':'OFF'}</span>
+    </label>`;
+
+  let h = sectionTitle('How the bot fights');
+  h += toggleRow('lspenable', S.lspEnabled,
+        '🧪 Use stamina potions',
+        'Only on timed bosses — farming never uses potions',
+        'Never use potions — natural stamina only');
+  h += toggleRow('smallhits', S.smallHits,
+        '⚔️ Hit style: small &amp; frequent',
+        'Many small hits (10–50 stamina) — more free-hit procs',
+        'Big exact hits — minimal overshoot on the damage target');
+  h += toggleRow('questenable', S.questEnabled,
+        '📜 Auto Adventurer&apos;s Guild quests',
+        'Accept a quest → farm its mob on g5w9 (≥5m each) → turn in → next',
+        'Quests off — never touch the Adventurer&apos;s Guild');
+
+  h += sectionTitle('Targets — what to attack');
+  h += `
+    <div style="display:flex;gap:6px;margin-bottom:6px;position:sticky;top:-8px;
+      background:#0d0d18;padding:4px 0;z-index:2">
+      <button data-action="scanpage" style="flex:1;background:#2a3a6a;color:#cfe;border:none;
+        border-radius:5px;padding:7px;cursor:pointer;font:bold 11px monospace">🔍 Scan this page</button>
+      <button data-action="save" title="Save &amp; apply" style="background:#2f8050;color:#fff;border:none;
+        border-radius:5px;padding:7px 10px;cursor:pointer;font:bold 11px monospace">💾 Save</button>
+      <button data-action="reset" title="Restore defaults" style="background:#3a2a2a;color:#f99;border:none;
+        border-radius:5px;padding:7px 9px;cursor:pointer;font:12px monospace">↺</button>
+    </div>
+    <div style="color:#667;font-size:10px;margin-bottom:8px;line-height:1.5">
+      You're on: <span style="color:#9cf">${esc(pageLabel(curUrl))}</span><br>
+      Open a wave or guild-dungeon page → <b style="color:#9cf">Scan this page</b> → tick the
+      monsters to attack, set the damage and type → <b style="color:#7f8">Save</b>. ✕ removes a target.
+    </div>`;
+
+  if (!S.config.length) {
+    h += `<div style="color:#556;font-size:11px;padding:6px 2px">No pages yet. Open a wave or dungeon and press 🔍 Scan this page.</div>`;
+  }
+
+  S.config.forEach((w, wi) => {
+    const url       = srcUrl(w);
+    const isCurrent = url === curUrl;
+    const activeN   = (w.targets || []).filter(t => t.enabled !== false).length;
+    h += `<div style="border:1px solid ${isCurrent?'#2f8050':'#2b2e49'};border-radius:8px;padding:7px;margin-bottom:8px;background:#10101c">
+      <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+        <input type="checkbox" data-act="wave-enable" data-wi="${wi}" ${w.enabled!==false?'checked':''} title="page on/off">
+        <input style="${IN};flex:1" data-fld="label" data-wi="${wi}" value="${esc(w.label || pageLabel(url))}">
+        ${activeN?`<span style="color:#2f8;font-size:10px">${activeN} active</span>`:`<span style="color:#556;font-size:10px">0 active</span>`}
+        <button data-action="delwave" data-wi="${wi}" title="delete page" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font:11px monospace">🗑</button>
+      </div>
+      <div style="color:#556;font-size:9px;margin-bottom:6px">${isCurrent?'<span style="color:#2f8">● this page</span>':'open this page to re-scan'}</div>`;
+
+    // ── DUNGEON source: single boss, just a damage field (no scan checklist) ──
+    if (w.kind === 'dungeon') {
+      const t = (w.targets || [])[0];
+      h += `<div style="font-size:10px;color:#9cf;margin-bottom:4px">🏰 dungeon boss · dgmid ${esc(w.dgmid)}</div>`;
+      if (t) {
+        h += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:3px 2px">
+          <span style="color:#fab;font-size:12px;flex:1">${esc(t.label)}</span>
+          <span style="color:#9cf;font-size:10px">stop at</span>
+          <input style="${IN};width:74px" data-fld="dmg" data-wi="${wi}" data-name="${esc(t.srcName || t.label)}" value="${esc(fmtDmg(t.dmgTarget))}">
+        </div>
+        <div style="color:#556;font-size:9px;margin-top:3px">hits until this damage (or the boss dies) · the dgmid expires on reset: re-open the page and re-scan</div>`;
+      }
+      h += `</div>`;
+      return;
+    }
+
+    // rows = scanned mobs, then any saved target not present in the current scan
+    const scanned = _scan[w.id] || [];
+    const seen = new Set(scanned.map(r => r.name));
+    const rows = scanned.slice();
+    for (const t of (w.targets || [])) {
+      const nm = t.srcName || t.label;
+      if (!seen.has(nm)) { rows.push({ name: nm, count: null, boss: !!t.timer }); seen.add(nm); }
+    }
+
+    if (!rows.length) {
+      h += `<div style="color:#556;font-size:11px;padding:2px">open this page and press 🔍 to list its monsters</div>`;
+    }
+
+    rows.forEach((r, idx) => {
+      const t   = targetFor(w, r.name);
+      const on  = !!t;
+      const grp = `mode_${wi}_${idx}`;
+      h += `<div style="border:1px solid ${on?'#2f5040':'#23253f'};border-radius:6px;padding:5px 6px;margin-bottom:5px;background:#0e0e18">
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" data-act="row" data-wi="${wi}" data-name="${esc(r.name)}" ${on?'checked':''}>
+          <span style="flex:1;color:${r.boss?'#fab':'#7df'};font-size:12px">${r.boss?'👑 ':''}${esc(r.name)}${r.count!=null?` <span style="color:#556">×${r.count}</span>`:''}</span>
+          ${on?`<button data-action="deltarget" data-wi="${wi}" data-name="${esc(r.name)}" title="remove target" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:1px 7px;cursor:pointer;font:12px monospace">✕</button>`:''}
+        </div>`;
+      if (on) {
+        const farm = !t.timer;
+        h += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-left:22px">
+          <span style="color:#9cf;font-size:10px">stop at</span>
+          <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="stop attacking once you've dealt this much damage">
+          <label style="color:#fab;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Timed boss: fight to the damage target, then move on (may use potions)">
+            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="timed" ${t.timer?'checked':''}> ⏰ Timed
+          </label>
+          <label style="color:#7df;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Farm: kill regular monsters (no potions)">
+            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
+        if (farm) {
+          h += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
+        }
+        h += `</div>`;
+      }
+      h += `</div>`;
+    });
+
+    h += `</div>`;
+  });
+
+  uiContent.innerHTML = h;
+  wireSettings();
+}
+
+// Apply edits LIVE: debounced save + rebuild so a changed damage/kill target takes
+// effect immediately (the runtime WAVES are rebuilt) WITHOUT having to reach the 💾
+// Save button — which on a phone is often scrolled off-screen, so edits silently never
+// applied ("continua a fare 50m nonostante abbia risettato i danni"). 💾 still works.
+let _applyTimer = null;
+function scheduleApply() {
+  clearTimeout(_applyTimer);
+  _applyTimer = setTimeout(() => { save(); rebuildWaves(); log('⚙ changes applied', '#778'); }, 700);
+}
+
+// Delegated handlers (assigned, not added, so no listener buildup per render).
+function wireSettings() {
+  const wave = wi => S.config[+wi];
+
+  uiContent.oninput = e => {
+    const el = e.target, f = el.dataset.fld; if (!f) return;
+    const w = wave(el.dataset.wi); if (!w) return;
+    if (f === 'label') { w.label = el.value; scheduleApply(); return; }
+    const t = targetFor(w, el.dataset.name); if (!t) return;
+    if (f === 'dmg') {
+      const n = parseAmount(el.value);
+      if (n != null) t.dmgTarget = n;
+    } else if (f === 'killLimit') {
+      const raw = el.value.replace(/[^\d]/g, '');
+      t.killLimit = raw === '' ? 1 : Math.max(1, parseInt(raw));
+    }
+    scheduleApply();
+  };
+
+  uiContent.onchange = e => {
+    const el = e.target, a = el.dataset.act; if (!a) return;
+    if (a === 'smallhits')  { S.smallHits   = el.checked; save(); renderSettings(); return; }
+    if (a === 'lspenable')  { S.lspEnabled  = el.checked; save(); renderSettings(); return; }
+    if (a === 'questenable'){ S.questEnabled= el.checked; save(); renderSettings(); return; }
+    const w = wave(el.dataset.wi); if (!w) return;
+    const nm = el.dataset.name;
+    if (a === 'wave-enable') {
+      w.enabled = el.checked;
+      scheduleApply();
+    } else if (a === 'row') {
+      if (el.checked) {
+        if (!targetFor(w, nm)) {
+          const boss = (_scan[w.id] || []).find(r => r.name === nm)?.boss;
+          (w.targets = w.targets || []).push(mkTarget(nm, !!boss));
+        }
+      } else {
+        const t = targetFor(w, nm);
+        if (t) w.targets.splice(w.targets.indexOf(t), 1);
+      }
+      scheduleApply(); renderSettings();
+    } else if (a === 'mode') {
+      const t = targetFor(w, nm); if (!t) return;
+      if (el.value === 'timed') { t.timer = true;  t.killLimit = null;            t.useLSP = 'asNeeded'; }
+      else                      { t.timer = false; t.killLimit = t.killLimit || 400; t.useLSP = false; }
+      scheduleApply(); renderSettings();
+    }
+  };
+
+  uiContent.onclick = async e => {
+    const b = e.target.closest('[data-action]'); if (!b) return;
+    const a = b.dataset.action, wi = +b.dataset.wi, nm = b.dataset.name;
+    if (a === 'save') {
+      save(); rebuildWaves();
+      b.textContent = '✓ Saved'; setTimeout(() => { b.textContent = '💾 Save'; }, 1200);
+      log('⚙ config saved & applied', '#9060ff');
+    } else if (a === 'reset') {
+      S.config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+      for (const w of S.config) { if (!w.url) w.url = srcUrl(w); if (!w.label) w.label = pageLabel(w.url); }
+      for (const k of Object.keys(_scan)) delete _scan[k];
+      save(); rebuildWaves(); renderSettings();
+      log('⚙ config reset to defaults', '#9060ff');
+    } else if (a === 'scanpage') {
+      await scanCurrentPage(b);
+    } else if (a === 'delwave') {
+      const w = S.config[wi];
+      if (w) delete _scan[w.id];
+      S.config.splice(wi, 1);
+      scheduleApply(); renderSettings();
+    } else if (a === 'deltarget') {
+      const w = S.config[wi], t = w && targetFor(w, nm);
+      if (t) w.targets.splice(w.targets.indexOf(t), 1);
+      scheduleApply(); renderSettings();
+    }
+  };
+}
+
+function renderUI() {
+  if (!uiContent || minimized) return;
+  if (activeTab === 'settings') return;   // Settings owns its DOM (live inputs) — don't clobber
+  uiContent.innerHTML = activeTab === 'log' ? renderLog() : renderStatus();
+}
+
+// Reset ONLY the top counters (uptime, boss kills, heals, potions used, attacks,
+// quest tallies). The per-mob farm progress — S.kills and the 🎯 Farming bars — is
+// deliberately kept (user: "le statistiche superiori, non quelle dei mob farmati").
+function resetStats() {
+  S.started   = Date.now();
+  S.timedKills = 0; S.timedBy = {};
+  S.hpHeals    = 0; S.lspUses = 0; S.attacks = 0;
+  S.questTaken = 0; S.questDone = 0;
+  save();
+  log('🗑 statistiche superiori azzerate (mob farmati mantenuti)', '#9cf');
+  renderUI();
+}
+
+// ── BUILD PANEL ───────────────────────────────────────────────────────────────
+function buildUI() {
+  uiPanel = document.createElement('div');
+  Object.assign(uiPanel.style, {
+    position: 'fixed', bottom: '8px', right: '8px',
+    // responsive width so the panel never overflows a phone screen (was a fixed 330px
+    // that ran off the right edge on mobile, hiding the Save button + farm counter)
+    width: 'min(330px, calc(100vw - 16px))',
+    maxWidth: 'calc(100vw - 16px)', boxSizing: 'border-box',
+    background: '#0d0d18',
+    border: '1px solid #3a3a5c', borderRadius: '10px',
+    zIndex: '2147483647', fontFamily: 'monospace', fontSize: '12px',
+    boxShadow: '0 4px 28px #0009',
+  });
+
+  const hdr = document.createElement('div');
+  Object.assign(hdr.style, {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    padding: '7px 10px', background: '#16162a',
+    borderRadius: '10px 10px 0 0', cursor: 'grab',
+  });
+  hdr.innerHTML = `
+    <span style="color:#9060ff;font-weight:bold;font-size:12px">⚔ Veyra Farm</span>
+    <span style="display:flex;gap:4px;align-items:center">
+      <button id="vfb-tab-s" style="background:#9060ff;color:#fff;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">Status</button>
+      <button id="vfb-tab-l" style="background:#252540;color:#aaa;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">📋 Log</button>
+      <button id="vfb-tab-g" style="background:#252540;color:#aaa;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚙ Setup</button>
+      <button id="vfb-r" title="reset stats (boss/heals/uptime — keeps farm kills)"
+        style="background:#252540;color:#ccc;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px">🗑</button>
+      <button id="vfb-p" style="background:#252540;color:#ccc;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px">⏸</button>
+      <button id="vfb-m" style="background:#252540;color:#ccc;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px">—</button>
+    </span>
+  `;
+
+  uiContent = document.createElement('div');
+  Object.assign(uiContent.style, {
+    padding: '8px 10px',
+    // cap the scroll area so the bottom of the content (the 🎯 Farming counter, and the
+    // long Setup list) is never pushed past the screen / under the mobile browser bars —
+    // it scrolls INSIDE the panel instead. (user: "non si vede la parte inferiore")
+    maxHeight: 'min(72vh, 640px)',
+    overflowY: 'auto', WebkitOverflowScrolling: 'touch', color: '#ccc',
+  });
+
+  uiPanel.append(hdr, uiContent);
+  document.body.appendChild(uiPanel);
+
+  // restore saved position (left/top) if the panel was dragged before
+  if (S.pos && S.pos.left != null) {
+    const left = Math.max(0, Math.min(window.innerWidth  - 60, S.pos.left));
+    const top  = Math.max(0, Math.min(window.innerHeight - 36, S.pos.top));
+    Object.assign(uiPanel.style, { left: left+'px', top: top+'px', right: 'auto', bottom: 'auto' });
+  }
+
+  function setTab(t) {
+    activeTab = t;
+    const sel = (id, active) => {
+      const b = document.getElementById(id);
+      b.style.background = active ? '#9060ff' : '#252540';
+      b.style.color      = active ? '#fff'    : '#aaa';
+    };
+    sel('vfb-tab-s', t === 'status');
+    sel('vfb-tab-l', t === 'log');
+    sel('vfb-tab-g', t === 'settings');
+    if (t === 'settings') renderSettings();
+    else renderUI();
+  }
+  document.getElementById('vfb-tab-s').onclick = e => { e.stopPropagation(); setTab('status'); };
+  document.getElementById('vfb-tab-l').onclick = e => { e.stopPropagation(); setTab('log'); };
+  // ⚙ toggles Settings open/closed (closing returns to Status)
+  document.getElementById('vfb-tab-g').onclick = e => {
+    e.stopPropagation();
+    setTab(activeTab === 'settings' ? 'status' : 'settings');
+  };
+
+  document.getElementById('vfb-p').onclick = e => {
+    e.stopPropagation();
+    paused = !paused;
+    S.paused = paused; save();   // survive page navigation
+    document.getElementById('vfb-p').textContent = paused ? '▶' : '⏸';
+    renderUI();
+  };
+  document.getElementById('vfb-p').textContent = paused ? '▶' : '⏸';   // reflect persisted state
+
+  // 🗑 reset the TOP counters — SINGLE click (user: "si dovrebbe clickare una sola
+  // volta", the old two-click ✓? was confusing). Keeps S.kills (per-mob farm progress
+  // + the 🎯 Farming bars) untouched, so an accidental click only wipes uptime/boss/
+  // heal tallies, which is cheap.
+  const rbtn = document.getElementById('vfb-r');
+  rbtn.onclick = e => {
+    e.stopPropagation();
+    resetStats();
+    rbtn.textContent = '✓'; rbtn.style.background = '#2f5040';
+    setTimeout(() => { rbtn.textContent = '🗑'; rbtn.style.background = '#252540'; }, 900);
+  };
+  document.getElementById('vfb-m').onclick = e => {
+    e.stopPropagation();
+    minimized = !minimized;
+    S.minimized = minimized; save();   // stay collapsed across page reloads
+    uiContent.style.display = minimized ? 'none' : 'block';
+    document.getElementById('vfb-m').textContent = minimized ? '□' : '—';
+  };
+  // reflect the persisted collapsed state on load (so a refresh doesn't re-open it)
+  uiContent.style.display = minimized ? 'none' : 'block';
+  document.getElementById('vfb-m').textContent = minimized ? '□' : '—';
+
+  // drag the panel anywhere (mouse + touch via Pointer Events); position persists
+  let drag = null;
+  hdr.addEventListener('pointerdown', e => {
+    if (e.target.tagName === 'BUTTON') return;   // don't drag when clicking a button
+    e.preventDefault();
+    const r = uiPanel.getBoundingClientRect();
+    drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    try { hdr.setPointerCapture(e.pointerId); } catch {}
+    hdr.style.cursor = 'grabbing';
+  });
+  hdr.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const left = Math.max(0, Math.min(window.innerWidth  - uiPanel.offsetWidth, e.clientX - drag.dx));
+    const top  = Math.max(0, Math.min(window.innerHeight - 36,                  e.clientY - drag.dy));
+    Object.assign(uiPanel.style, { left: left+'px', top: top+'px', right: 'auto', bottom: 'auto' });
+  });
+  const endDrag = () => {
+    if (!drag) return;
+    drag = null;
+    hdr.style.cursor = 'grab';
+    const r = uiPanel.getBoundingClientRect();
+    S.pos = { left: Math.round(r.left), top: Math.round(r.top) };
+    save();
+  };
+  hdr.addEventListener('pointerup', endDrag);
+  hdr.addEventListener('pointercancel', endDrag);
+
+  setInterval(renderUI, 2000);
+}
+
+// ── KEEP-AWAKE (mobile) ───────────────────────────────────────────────────────
+// Mobile browsers FREEZE JS timers when the tab is backgrounded and SUSPEND the page
+// entirely when the screen locks → the bot stalls (it resumes only when you wake/unlock).
+// The Screen Wake Lock API keeps the screen ON while THIS tab is in the foreground, so
+// just leaving the phone on with the page open keeps farming. It does NOT survive a
+// MANUAL screen lock or switching apps — no browser allows real background execution, so
+// for true 24/7 farming use the server bot instead. The lock auto-releases when the tab
+// is hidden; we re-acquire it the moment the tab becomes visible again.
+let _wakeLock = null;
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator && document.visibilityState === 'visible' && !_wakeLock) {
+      _wakeLock = await navigator.wakeLock.request('screen');
+      _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+      log('📱 wake-lock ON · schermo resta acceso finché la tab è aperta in primo piano', '#9cf');
+    }
+  } catch { /* unsupported / denied / not allowed (e.g. low battery) — ignore */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !_wakeLock) keepAwake();
+});
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+function init() {
+  purgeDomainCookies();   // remove the bad domain= duplicates older versions left
+  buildUI();
+  renderUI();
+  keepAwake();            // mobile: keep the screen on while the tab is in the foreground
+  log(`🔧 v1.17.1 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · guild-dungeon locations supported · screen wake-lock (mobile) · potions: LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
+  // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
+  // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
+  try {
+    window.__farmConfig = () => JSON.stringify(WAVES.map(w => ({
+      id: w.id, label: w.label,
+      targets: (w.targets || []).map(t => ({ key: t.key, label: t.label, dmgTarget: t.dmgTarget, timer: t.timer, killLimit: t.killLimit, include: t.include, exclude: t.exclude })),
+    })), null, 2);
+  } catch {}
+  for (const w of WAVES) {
+    for (const t of (w.targets || [])) {
+      log(`📋 ${w.id} · ${t.timer ? '⏰' : '🎯'} ${t.label} → stop@${fmtDmg(t.dmgTarget)}${t.killLimit != null ? ` ·${t.killLimit}k` : ''}${(t.include && t.include.length) ? ` inc[${t.include.join(',')}]` : ''}${(t.exclude && t.exclude.length) ? ` exc[${t.exclude.join(',')}]` : ''}`, '#cb8');
+    }
+  }
+  mainLoop().catch(e => console.error('[FarmBot]', e));
+}
+
+document.readyState === 'loading'
+  ? document.addEventListener('DOMContentLoaded', init)
+  : init();
+
+})();
