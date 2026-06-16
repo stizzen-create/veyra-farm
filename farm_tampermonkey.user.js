@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.19.0
+// @version      1.20.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -717,7 +717,7 @@ async function lootMob(idp) {
 const SMALLEST = SKILLS[SKILLS.length - 1];   // 1-stamina Slash
 const PROC_MAX_STAM = 50;                     // proc-farming caps hits at 50 stam (Heroic)
 
-async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false) {
+async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null) {
   await join(idp);
   let dmg = startDmg, K = 0, stall = 0, measured = !!knownStart;
   status = `→ ${label}`;
@@ -742,7 +742,12 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
         log(`⛔ ${label}: cap reached at ${fmtDmg(dmg)} and out of stamina → leaving WITHOUT a potion`, '#fa0');
         return { dmg, reason: 'cap' };
       }
-      if (lsp === 'asNeeded' || lsp === 'once') await useLSP();
+      // VARIANT B: for farm fights, first try to HARVEST exp (loot dead + briefly wait
+      // for near-expiring mobs to die) so a level-up refills stamina → potion saved.
+      // Falls back to the potion only if that didn't recover any stamina.
+      let recovered = false;
+      if (harvest) recovered = await harvest();
+      if (!recovered && (lsp === 'asNeeded' || lsp === 'once')) await useLSP();
       if (stam < 1) { log(`out of stamina on ${label} (${stam})`, '#fa0'); return { dmg, reason: 'nostam' }; }
     }
     // pick the attack tier:
@@ -788,6 +793,65 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     renderUI();
   }
   return { dmg, reason: 'done' };
+}
+
+// ── VARIANT B: harvest EXP before spending a stamina potion (farm only) ─────────
+// When a FARM target runs out of stamina we'd normally drink an LSP. Instead we first
+// LOOT every dead matching mob (free EXP, no stamina) and briefly WAIT for mobs that
+// are about to auto-die so we can loot them too. Leveling up refills stamina → potion
+// saved. Strictly BOUNDED so the farm never stalls for long:
+//   • only WAIT when the next death is within WAIT_LOOKAHEAD (otherwise loot now, return)
+//   • never wait more than HARVEST_WAIT_CAP in total
+// Returns true if stamina recovered (a level-up jump) → caller SKIPS the potion;
+// false → caller drinks the potion as fallback.
+const HARVEST_WAIT_CAP  = 120_000;  // max total wait per harvest (ms) — tune here
+const WAIT_LOOKAHEAD    = 45_000;   // only wait if a mob auto-dies within this window
+const HARVEST_MIN_STAM  = 500;      // stamina jump that counts as "leveled up / recovered"
+
+async function harvestWaveExp(wave, targets) {
+  const farm = (targets || []).filter(t => !t.timer);
+  if (!farm.length) return false;
+  const stamStart = stam;
+  const deadline  = Date.now() + HARVEST_WAIT_CAP;
+  const looted    = new Set();
+
+  while (Date.now() < deadline && !paused && running) {
+    delete _waveCache[wave.url];                 // force a fresh read (stamina + dead mobs)
+    const mobs = await fetchWave(wave.url, true);
+
+    // loot every dead matching farm mob not yet looted this harvest
+    for (const m of mobs.filter(x => x.dead)) {
+      if (looted.has(m.id)) continue;
+      const t = farm.find(ft => ft.match(m) && !isTimedName(m.name));
+      if (!t) continue;
+      const r = await lootMob({ monster_id: m.id });
+      looted.add(m.id);
+      if (r !== null && t.killLimit !== null) {
+        S.kills[m.name] = (S.kills[m.name] || 0) + 1;
+        log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}`, '#2f8');
+      }
+    }
+    save();
+
+    // leveled up? stamina jumped → potion saved
+    if (stam >= stamStart + HARVEST_MIN_STAM && stam >= SKILL_COST) {
+      log(`🌟 looted/leveled → stamina ${stam} (potion saved)`, '#2f8');
+      return true;
+    }
+
+    // soonest auto-death among alive matching farm mobs
+    const now  = Math.floor(Date.now() / 1000);
+    const soon = mobs
+      .filter(m => !m.dead && m.expire > now && farm.some(t => t.match(m) && !isTimedName(m.name)))
+      .map(m => m.expire).sort((a, b) => a - b)[0];
+    if (!soon || (soon - now) * 1000 > WAIT_LOOKAHEAD) break;   // nothing dying soon → stop
+    const waitMs = Math.min((soon - now) * 1000 + 1500, deadline - Date.now(), 30_000);
+    if (waitMs <= 0) break;
+    status = `⏳ ${Math.ceil(waitMs / 1000)}s → loot expiring mobs (save potion)`;
+    renderUI();
+    await sleep(waitMs);
+  }
+  return stam >= SKILL_COST && stam >= stamStart + HARVEST_MIN_STAM;
 }
 
 // ── PROCESS WAVE ──────────────────────────────────────────────────────────────
@@ -862,7 +926,10 @@ async function processWave(wave, targets = null, interruptible = false) {
 
       if (t.useLSP === 'once') await useLSP();
       if (stam < 1) {
-        if (t.useLSP === 'asNeeded' || t.useLSP === 'once') await useLSP();
+        // VARIANT B: farm targets first try to harvest exp (loot + wait for expiring
+        // mobs → level-up refills stamina) before drinking; timed bosses just drink.
+        if (!t.timer) await harvestWaveExp(wave, targets);
+        if (stam < 1 && (t.useLSP === 'asNeeded' || t.useLSP === 'once')) await useLSP();
         // niente stamina e niente pozione utilizzabile: tutti i mob restanti di
         // questo target richiedono stamina → inutile provarli a uno a uno (era lo
         // spam "no stam — skip" ×42/ciclo). Esci dal target.
@@ -871,7 +938,8 @@ async function processWave(wave, targets = null, interruptible = false) {
 
       log(`→ ${mob.name} (${fmtDmg(mob.userdmg)} / ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
       const { dmg, reason } = await fightTarget(
-        { monster_id: mob.id }, mob.name, mob.userdmg, t.dmgTarget, t.useLSP, interruptible, true, !!t.exact);
+        { monster_id: mob.id }, mob.name, mob.userdmg, t.dmgTarget, t.useLSP, interruptible, true, !!t.exact,
+        t.timer ? null : (() => harvestWaveExp(wave, targets)));
       if (reason === 'interrupt') return;             // a timed boss respawned → bail to phase 1
       if (dmg >= t.dmgTarget) {
         const over = dmg - t.dmgTarget;   // residuo oltre il target (≤ 1 colpo da 1 stam)
@@ -1812,7 +1880,7 @@ function buildUI() {
     borderRadius: '10px 10px 0 0', cursor: 'grab',
   });
   hdr.innerHTML = `
-    <span style="color:#9060ff;font-weight:bold;font-size:12px">⚔ Veyra Farm</span>
+    <span style="color:#9060ff;font-weight:bold;font-size:12px">⚔ Veyra Farm <span style="color:#667;font-weight:normal;font-size:10px">by UANM</span></span>
     <span style="display:flex;gap:4px;align-items:center">
       <button id="vfb-tab-s" style="background:#9060ff;color:#fff;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">Status</button>
@@ -1960,7 +2028,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.19.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm uses LSP · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.20.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
