@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.20.0
+// @version      1.21.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1440,11 +1440,15 @@ function parseAmount(s) {
 // back to the target; include is the core token so it still matches if the boss's
 // full title shifts. LSP + timer are derived (boss/timed → auto LSP, farm → none).
 function mkTarget(name, boss) {
+  const full = name.toLowerCase().trim();
   return {
     key: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     label: name, srcName: name,
-    include: [name.split(',')[0].trim()], exclude: [],
-    dmgTarget: boss ? 3_000_000 : 100_000_000,   // farm: 100M/mob (drop threshold)
+    // boss → match on the FULL name so similarly-titled summon bosses don't collide
+    // (e.g. "Hermes, Divine Herald of the Endless Road" must NOT also match
+    // "Pan, Wild Herald of Hermes"). farm → short first-segment token.
+    include: [boss ? full : full.split(',')[0].trim()], exclude: [],
+    dmgTarget: boss ? 3_000_000_000 : 100_000_000,   // boss: 3B (edit in UI); farm: 100M/mob
     killLimit: boss ? null : 400,
     useLSP: 'asNeeded',   // v1.18.0: farm usa LSP come i boss (FSP mai)
     timer: !!boss, enabled: true,
@@ -1552,6 +1556,7 @@ async function scanCurrentPage(btn) {
   // actually see the live mobs. (fetch carries the cookie set in this same tick,
   // so there's no race with the main loop.)
   let alive = Object.values(_collectMobs(document)).filter(m => !m.dead);
+  let summonRoot = document;
   if (alive.length) {
     _collectAutoSummon(document);
   } else {
@@ -1564,6 +1569,7 @@ async function scanCurrentPage(btn) {
       const doc = new DOMParser().parseFromString(html, 'text/html');
       _collectAutoSummon(doc);
       alive = Object.values(_collectMobs(doc)).filter(m => !m.dead);
+      summonRoot = doc;
     }
   }
 
@@ -1574,7 +1580,20 @@ async function scanCurrentPage(btn) {
     name, count,
     boss: bossNames.some(bn => bn.split(',')[0] && name.includes(bn.split(',')[0]))
         || /general|king|titan|herald|hunter|emperor|lord|queen|god|eternal/i.test(name),
-  })).sort((a, b) => (b.boss - a.boss) || (b.count - a.count));
+  }));
+
+  // Also surface AUTO-SUMMON boss cards (the timed bosses — Hermes, Pan, …). They are
+  // NOT .monster-card, so _collectMobs never sees them, and a timed boss is usually
+  // DEAD (in respawn) when you scan — so it would never be selectable. List them here
+  // so you can flag them ⏰ Timed even while dead. count = 0 → shown as "×0" (respawning).
+  for (const c of summonRoot.querySelectorAll('.auto-summon-card')) {
+    const nm = (c.querySelector('.auto-summon-name')?.textContent || '')
+                 .replace(/\s+/g, ' ').toLowerCase().trim();
+    if (!nm || distinct[nm] || list.some(r => r.name === nm)) continue;  // already listed as an alive card
+    list.push({ name: nm, count: c.dataset.alive === '1' ? 1 : 0, boss: true });
+  }
+
+  list.sort((a, b) => (b.boss - a.boss) || (b.count - a.count));
 
   let src = S.config.find(w => srcUrl(w) === url);
   if (!src && !list.length) {
