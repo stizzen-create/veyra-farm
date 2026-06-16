@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.18.0
+// @version      1.19.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -137,6 +137,13 @@ const defState = () => ({
   // toccano mai. Default ON = la logica voluta (pozioni solo per i timed). Mettere
   // OFF per non spendere NESSUNA pozione (farm solo con stamina naturale).
   lspEnabled: true,
+  // ── HP potions (auto-heal) ──────────────────────────────────────────────────
+  // Soglia (%) sotto la quale il bot beve una pozione HP (user_heal_potion.php).
+  // 0 = OFF: non cura MAI (aspetta la rigenerazione naturale, non spende pozioni).
+  // >0 = cura quando HP% ≤ soglia (e comunque alla morte). Slider nel ⚙ Setup.
+  // Default 10% = cura solo quando sei quasi morto (prima curava SEMPRE alla morte
+  // e l'utente lo trovava troppo aggressivo → ora si sceglie con lo slider).
+  hpHealPct: 10,
   // ── Adventurer's Guild quests (auto accept → farm g5w9 → finish → next) ──
   // ON = il bot accetta una quest disponibile (fuori cooldown), farma il suo mob
   // su g5w9 fino al target del server, la consegna e prende la successiva.
@@ -259,15 +266,40 @@ async function getHtml(url) {
 }
 
 // ── STAMINA / HP ──────────────────────────────────────────────────────────────
-let stam    = 0;
-let userHp  = null;    // last known HP (from retaliation.user_hp_after)
-let hpEmpty = false;   // true once HP potions run out (avoid spamming the endpoint)
+let stam     = 0;
+let userHp   = null;   // last known HP (retaliation.user_hp_after / page "X / Y HP")
+let userHpMax = null;  // last known MAX HP (page "X / Y HP" or full-heal response)
+let hpEmpty  = false;  // true once HP potions run out (avoid spamming the endpoint)
 // persistent counters live on S: S.hpHeals, S.lspUses, S.timedKills
 
 function parseStam(html) {
   const m = html.match(/id="stamina_span"[^>]*>\s*([\d,]+)/)
          || html.match(/Stamina[^\d]{0,20}([\d,]+)/i);
   if (m) stam = parseInt(m[1].replace(/,/g, '')) || stam;
+}
+
+// read "12,345 / 67,890 HP" from a page → live HP + max (same source as veyra_colab).
+// Lets the % auto-heal threshold work, and refreshes HP so the bot resumes after a
+// natural regen when auto-heal is OFF.
+function parseHp(html) {
+  const m = html.match(/(\d[\d,]+)\s*\/\s*(\d[\d,]+)\s*HP/);
+  if (!m) return;
+  const cur = parseInt(m[1].replace(/,/g, '')), mx = parseInt(m[2].replace(/,/g, ''));
+  if (Number.isFinite(cur)) userHp = cur;
+  if (Number.isFinite(mx) && mx > 0) userHpMax = mx;
+}
+
+// current HP as a percentage of max (null if max unknown yet)
+function hpPct() { return (userHpMax > 0 && userHp != null) ? (userHp / userHpMax * 100) : null; }
+
+// Should we spend an HP potion right now? Threshold is user-chosen (S.hpHealPct, the
+// slider in ⚙ Setup): 0 = OFF (never auto-heal). Otherwise heal when HP% ≤ threshold.
+// If max HP isn't known yet, fall back to "only when actually dead".
+function wantHeal() {
+  const t = S.hpHealPct | 0;
+  if (t <= 0) return false;
+  const p = hpPct();
+  return p == null ? (userHp != null && userHp <= 0) : (p <= t);
 }
 
 function readStamFromDOM() {
@@ -383,6 +415,7 @@ async function healUp() {
   const ok = !!(d && (d.status === 'success' || /full hp/i.test(d.message || '')));
   if (ok) {
     userHp = parseInt(d.user_hp) || userHp;
+    if (userHp) userHpMax = Math.max(userHpMax || 0, userHp);   // full heal ⇒ this is max HP
     S.hpHeals++; save();
     const left = d.potions_remaining ?? '?';
     if (left === 0 || left === '0') hpEmpty = true;
@@ -520,6 +553,7 @@ async function fetchWave(url, needDead = false) {
   setHideDead(true);
   const html = await getHtml(url);
   parseStam(html);
+  parseHp(html);                   // live HP + max (for the % auto-heal threshold)
   parseAutoSummon(html);           // boss timers
   const mobs = parseMobs(html);    // alive cards
 
@@ -647,18 +681,21 @@ async function attack(idp, skillId = SKILL_ID, cost = SKILL_COST) {
   const msg = d.message || '';
   if (msg.includes('Slow down'))          { await sleep(1200); return null; }
   if (/rejoin|removed due/i.test(msg))    { await join(idp);   return null; }
-  // death: server refuses the hit while we're dead → heal, then rejoin & retry next loop
+  // death: server refuses the hit while we're dead. Heal+rejoin ONLY if auto-heal is on
+  // (S.hpHealPct>0); if it's OFF the user chose not to spend potions → stay dead (the
+  // fight loop / processWave skip out and wait for natural HP regen).
   if (/you are dead|you have died|you'?re dead/i.test(msg)) {
-    if (await healUp()) await join(idp);
+    userHp = 0;
+    if (S.hpHealPct > 0 && await healUp()) await join(idp);
     return null;
   }
   if (msg.includes('Not enough stamina')) return null;
   if (d.stamina !== undefined) stam = parseInt(d.stamina);
-  // track our HP from the boss retaliation; heal the instant it drops us to 0
+  // track our HP from the boss retaliation; heal when it drops at/below the chosen %
   const ret = d.retaliation || {};
   if (ret.user_hp_after !== undefined) {
     userHp = Math.max(0, parseInt(ret.user_hp_after) || 0);
-    if (userHp <= 0) { if (await healUp()) await join(idp); }
+    if (wantHeal()) { if (await healUp()) await join(idp); }
   }
   return d;
 }
@@ -686,6 +723,9 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
   status = `→ ${label}`;
 
   while (dmg < dmgTarget && !paused && running) {
+    // dead with auto-heal OFF → don't burn an HP potion: bail out quietly and let the
+    // bot wait for natural HP regen (the next wave read refreshes userHp).
+    if (S.hpHealPct <= 0 && userHp != null && userHp <= 0) return { dmg, reason: 'dead' };
     await refreshTimers();   // keep boss death/respawn countdowns fresh during long fights
     if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return { dmg, reason: 'interrupt' }; }
 
@@ -809,6 +849,11 @@ async function processWave(wave, targets = null, interruptible = false) {
       m.userdmg < t.dmgTarget &&
       (t.killLimit === null || (S.kills[m.name] || 0) < t.killLimit)
     );
+
+    // dead + auto-heal OFF: nothing to do until HP regenerates (one log, not per-mob spam)
+    if (S.hpHealPct <= 0 && userHp != null && userHp <= 0) {
+      log(`💀 dead & auto-heal OFF — waiting for HP regen (stop ${t.key})`, '#fa0'); break;
+    }
 
     for (const mob of alive) {
       if (paused || !running) break;
@@ -1209,7 +1254,9 @@ function renderStatus() {
       ${stat('👑', S.timedKills.toLocaleString(), 'boss kills', '#f90')}
       ${stat('🧪', potStock, 'pots left' + (potNone ? ' ⚠' : ''), potNone ? '#f66' : '#cfe')}
       ${stat('❤️', S.hpHeals.toLocaleString(), 'heals' + (hpEmpty ? ' (0!)' : ''), hpEmpty ? '#f66' : '#cfe')}
-      ${stat('🩸', userHp == null ? '—' : fmtDmg(userHp), 'HP')}
+      ${stat('🩸', userHp == null ? '—' : (hpPct() != null ? `${Math.round(hpPct())}%` : fmtDmg(userHp)),
+             'HP' + (S.hpHealPct > 0 ? ` (heal ≤${S.hpHealPct}%)` : ' (heal OFF)'),
+             hpPct() != null && hpPct() <= (S.hpHealPct || 0) ? '#f66' : '#cfe')}
     </div>
     <div style="color:${sc};font-size:12px;margin:2px 0 8px;overflow:hidden;
       text-overflow:ellipsis;white-space:nowrap">${paused ? '⏸ PAUSED' : '▶ '}${esc(status)}</div>
@@ -1508,6 +1555,24 @@ function renderSettings() {
         'Accept a quest → farm its mob on g5w9 (≥5m each) → turn in → next',
         'Quests off — never touch the Adventurer&apos;s Guild');
 
+  // ── HP auto-heal slider ──────────────────────────────────────────────────────
+  // 0 = OFF (never spend HP potions, wait for regen) · 5..90 = heal when HP ≤ that %.
+  const hpv  = S.hpHealPct | 0;
+  const hpOff = hpv <= 0;
+  const hpDesc = hpOff
+    ? 'OFF — never auto-heal; waits for natural HP regen (no potions spent)'
+    : `Drinks an HP potion when your HP drops to ${hpv}% or below`;
+  h += `
+    <div style="background:#10101c;border:1px solid #3a3144;border-radius:6px;padding:8px;margin-bottom:6px">
+      <div style="display:flex;align-items:center;gap:8px;font-size:11px">
+        <span style="flex:1;color:#dfe6ff">❤️ Auto-heal HP threshold</span>
+        <span id="vfb-hp-val" style="font-weight:bold;color:${hpOff?'#777':'#f88'}">${hpOff?'OFF':hpv+'%'}</span>
+      </div>
+      <input type="range" min="0" max="90" step="5" value="${hpv}" data-act="hphealpct"
+        style="width:100%;margin:7px 0 3px;accent-color:#f44;cursor:pointer">
+      <div id="vfb-hp-desc" style="color:#667;font-size:10px">${hpDesc}</div>
+    </div>`;
+
   h += sectionTitle('Targets — what to attack');
   h += `
     <div style="display:flex;gap:6px;margin-bottom:6px;position:sticky;top:-8px;
@@ -1621,7 +1686,21 @@ function wireSettings() {
   const wave = wi => S.config[+wi];
 
   uiContent.oninput = e => {
-    const el = e.target, f = el.dataset.fld; if (!f) return;
+    const el = e.target;
+    // ❤️ HP auto-heal slider — update live (no full re-render, so the drag isn't lost)
+    if (el.dataset.act === 'hphealpct') {
+      const v = Math.max(0, Math.min(90, parseInt(el.value) || 0));
+      S.hpHealPct = v; save();
+      const off = v <= 0;
+      const vEl = document.getElementById('vfb-hp-val');
+      const dEl = document.getElementById('vfb-hp-desc');
+      if (vEl) { vEl.textContent = off ? 'OFF' : v + '%'; vEl.style.color = off ? '#777' : '#f88'; }
+      if (dEl) dEl.textContent = off
+        ? 'OFF — never auto-heal; waits for natural HP regen (no potions spent)'
+        : `Drinks an HP potion when your HP drops to ${v}% or below`;
+      return;
+    }
+    const f = el.dataset.fld; if (!f) return;
     const w = wave(el.dataset.wi); if (!w) return;
     if (f === 'label') { w.label = el.value; scheduleApply(); return; }
     const t = targetFor(w, el.dataset.name); if (!t) return;
@@ -1659,7 +1738,7 @@ function wireSettings() {
     } else if (a === 'mode') {
       const t = targetFor(w, nm); if (!t) return;
       if (el.value === 'timed') { t.timer = true;  t.killLimit = null;            t.useLSP = 'asNeeded'; }
-      else                      { t.timer = false; t.killLimit = t.killLimit || 400; t.useLSP = false; }
+      else                      { t.timer = false; t.killLimit = t.killLimit || 400; t.useLSP = 'asNeeded'; }
       scheduleApply(); renderSettings();
     }
   };
@@ -1881,7 +1960,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.17.1 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · guild-dungeon locations supported · screen wake-lock (mobile) · potions: LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.19.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm uses LSP · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())

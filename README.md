@@ -4,6 +4,8 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
 
 > ⚠️ **Use at your own risk.** Unofficial automation for a third‑party game; it may violate the game’s terms of service. Provided for educational purposes. **No credentials are stored** — the script just reads your existing login cookie in the browser at runtime.
 
+> 💻 **Platform support:** currently working on **desktop / PC only**. **Mobile is still in testing** — phones suspend background JavaScript, so it isn't reliable yet. Use the PC version for now.
+
 ---
 
 ## Screenshots
@@ -36,8 +38,8 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
 2. Open the script’s **raw** URL → Tampermonkey shows the install page → **Install**.
 3. Open demonicscans.org — the **⚔ Veyra Farm** panel appears bottom‑right.
 
-## Install / update (mobile)
-Phones suspend background JavaScript, so the bot only runs with the **tab open and the screen on** (the built‑in wake‑lock keeps the screen awake). Install from the hosted raw URL once, and Tampermonkey will offer **one‑tap updates** whenever the version bumps — no copy‑paste needed. Use a Tampermonkey‑capable browser (Firefox, Kiwi, or Microsoft Edge on Android).
+## Install / update (mobile) — ⚠️ still in testing
+**Mobile support is experimental and not reliable yet** — phones suspend background JavaScript, so the bot only runs with the **tab open and the screen on** (the built‑in wake‑lock keeps the screen awake). For now, prefer the **desktop / PC** version. If you want to try it anyway: install from the hosted raw URL once, and Tampermonkey will offer **one‑tap updates** whenever the version bumps — no copy‑paste needed. Use a Tampermonkey‑capable browser (Firefox, Kiwi, or Microsoft Edge on Android).
 
 ---
 
