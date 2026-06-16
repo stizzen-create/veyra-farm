@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.17.1
+// @version      1.18.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -63,7 +63,7 @@ const DEFAULT_CONFIG = [
   ]},
   { id:'g5w10', gate:5, wave:10, enabled:true, targets:[
     { key:'pan',        label:'Pan, Wild Herald of Hermes',           include:['pan'],        exclude:[],                 dmgTarget:120_000_000, killLimit:null, useLSP:'asNeeded', timer:true,  enabled:true },
-    { key:'g5w10-farm', label:'G5W10 Farm',                          include:[],             exclude:['pan','hermes'],   dmgTarget:100_000_000, killLimit:400,  useLSP:false, timer:false, enabled:true },
+    { key:'g5w10-farm', label:'G5W10 Farm',                          include:[],             exclude:['pan','hermes'],   dmgTarget:100_000_000, killLimit:400,  useLSP:'asNeeded', timer:false, enabled:true },
   ]},
   { id:'g5w11', gate:5, wave:11, enabled:true, targets:[
     { key:'orion',      label:'Orion, Eternal Hunter of Artemis',     include:['orion'],      exclude:[], dmgTarget:500_000_000, killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
@@ -131,6 +131,7 @@ const defState = () => ({
   // free-hit procs, but it overshoots small targets (e.g. ~19M on a 5M quest mob).
   smallHits: false,
   _exactMigrated: false,   // one-time flip of the old proc-farming default → exact
+  _farmLspMigrated: false, // one-time: farm targets drink LSP too (user request v1.18.0)
   // master kill-switch per le pozioni stamina (LSP). Le pozioni vengono usate SOLO
   // dai target timed (hanno useLSP:'asNeeded'); i farm hanno useLSP:false e non le
   // toccano mai. Default ON = la logica voluta (pozioni solo per i timed). Mettere
@@ -163,6 +164,16 @@ for (const w of S.config) {
   if (!w.label) w.label = pageLabel(w.url) || w.id;
 }
 const save = () => GM_setValue(SK, JSON.stringify(S));
+
+// v1.18.0: l'utente vuole che ANCHE i mob in farming usino le pozioni (LSP), come i
+// boss timed. Flippa una volta sola tutti i target farm (non-timed) salvati da
+// useLSP:false → 'asNeeded' (FSP resta comunque intoccato — non è in STAM_POTS).
+// Da qui in poi i nuovi target farm nascono già con 'asNeeded' (DEFAULT_CONFIG + mkTarget).
+if (S._farmLspMigrated !== true) {
+  for (const w of (S.config || [])) for (const t of (w.targets || []))
+    if (!t.timer && t.useLSP === false) t.useLSP = 'asNeeded';
+  S._farmLspMigrated = true; save();
+}
 
 // compile the runtime waves from the saved config; call again after edits
 function rebuildWaves() {
@@ -1320,7 +1331,7 @@ function mkTarget(name, boss) {
     include: [name.split(',')[0].trim()], exclude: [],
     dmgTarget: boss ? 3_000_000 : 100_000_000,   // farm: 100M/mob (drop threshold)
     killLimit: boss ? null : 400,
-    useLSP: boss ? 'asNeeded' : false,
+    useLSP: 'asNeeded',   // v1.18.0: farm usa LSP come i boss (FSP mai)
     timer: !!boss, enabled: true,
   };
 }
