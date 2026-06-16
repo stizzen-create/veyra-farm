@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.21.0
+// @version      1.22.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -747,7 +747,12 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
       // Falls back to the potion only if that didn't recover any stamina.
       let recovered = false;
       if (harvest) recovered = await harvest();
-      if (!recovered && (lsp === 'asNeeded' || lsp === 'once')) await useLSP();
+      // harvesting (loot dead + brief wait) can refill stamina via a level-up OR a bit
+      // of natural regen. RULE: always spend whatever stamina we have before a potion —
+      // only drink if it's STILL below a single 1-stam hit. (Was: drank whenever harvest
+      // didn't reach the +500 level-up threshold, even if stamina had come back usable →
+      // "prendeva la pozione pur avendo stamina residua".)
+      if (!recovered && stam < 1 && (lsp === 'asNeeded' || lsp === 'once')) await useLSP();
       if (stam < 1) { log(`out of stamina on ${label} (${stam})`, '#fa0'); return { dmg, reason: 'nostam' }; }
     }
     // pick the attack tier:
@@ -924,7 +929,9 @@ async function processWave(wave, targets = null, interruptible = false) {
       // before starting a farm mob, give timed bosses a chance
       if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return; }
 
-      if (t.useLSP === 'once') await useLSP();
+      // RULE: never drink with stamina left. The old `useLSP==='once'` here drank a
+      // potion at the START of every mob even on a full bar — removed. Potions are
+      // taken ONLY below, when stamina is actually exhausted (stam < 1).
       if (stam < 1) {
         // VARIANT B: farm targets first try to harvest exp (loot + wait for expiring
         // mobs → level-up refills stamina) before drinking; timed bosses just drink.
