@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.22.0
+// @version      1.23.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -132,10 +132,12 @@ const defState = () => ({
   smallHits: false,
   _exactMigrated: false,   // one-time flip of the old proc-farming default → exact
   _farmLspMigrated: false, // one-time: farm targets drink LSP too (user request v1.18.0)
-  // master kill-switch per le pozioni stamina (LSP). Le pozioni vengono usate SOLO
-  // dai target timed (hanno useLSP:'asNeeded'); i farm hanno useLSP:false e non le
-  // toccano mai. Default ON = la logica voluta (pozioni solo per i timed). Mettere
-  // OFF per non spendere NESSUNA pozione (farm solo con stamina naturale).
+  // Pozioni stamina (LSP): i boss TIMED le usano SEMPRE (così non perdi una finestra di
+  // spawn). Questo flag decide solo se ANCHE il FARM le usa:
+  //   ON  (checked)   → timed + farm bevono pozioni
+  //   OFF (unchecked) → solo i timed bevono; il farm gira con la sola stamina naturale
+  // (prima era un kill-switch totale "tutto o niente" — l'etichetta diceva "solo timed"
+  // ma in realtà beveva anche per il farm: incoerenza sistemata in v1.23.0.)
   lspEnabled: true,
   // ── HP potions (auto-heal) ──────────────────────────────────────────────────
   // Soglia (%) sotto la quale il bot beve una pozione HP (user_heal_potion.php).
@@ -352,8 +354,11 @@ function pickPotion() {
   return null;
 }
 
-async function useLSP() {
-  if (!S.lspEnabled) return false;   // potions disabled — don't waste them (toggle in Settings ⚙)
+async function useLSP(timer = false) {
+  // Timed bosses always drink (don't miss a spawn window). Farm mobs drink only when the
+  // user enabled it (toggle ⚙). S.lspEnabled now means "farm uses potions too", NOT a
+  // global on/off — timed potions are unconditional.
+  if (!timer && !S.lspEnabled) return false;
   let pick = pickPotion();
   if (!pick) { await refreshInv(); pick = pickPotion(); }
   if (!pick) { log('no LSP left (FSP is never used)', '#f66'); return false; }
@@ -717,7 +722,7 @@ async function lootMob(idp) {
 const SMALLEST = SKILLS[SKILLS.length - 1];   // 1-stamina Slash
 const PROC_MAX_STAM = 50;                     // proc-farming caps hits at 50 stam (Heroic)
 
-async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null) {
+async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null, timer = false) {
   await join(idp);
   let dmg = startDmg, K = 0, stall = 0, measured = !!knownStart;
   status = `→ ${label}`;
@@ -752,7 +757,7 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
       // only drink if it's STILL below a single 1-stam hit. (Was: drank whenever harvest
       // didn't reach the +500 level-up threshold, even if stamina had come back usable →
       // "prendeva la pozione pur avendo stamina residua".)
-      if (!recovered && stam < 1 && (lsp === 'asNeeded' || lsp === 'once')) await useLSP();
+      if (!recovered && stam < 1 && (lsp === 'asNeeded' || lsp === 'once')) await useLSP(timer);
       if (stam < 1) { log(`out of stamina on ${label} (${stam})`, '#fa0'); return { dmg, reason: 'nostam' }; }
     }
     // pick the attack tier:
@@ -936,7 +941,7 @@ async function processWave(wave, targets = null, interruptible = false) {
         // VARIANT B: farm targets first try to harvest exp (loot + wait for expiring
         // mobs → level-up refills stamina) before drinking; timed bosses just drink.
         if (!t.timer) await harvestWaveExp(wave, targets);
-        if (stam < 1 && (t.useLSP === 'asNeeded' || t.useLSP === 'once')) await useLSP();
+        if (stam < 1 && (t.useLSP === 'asNeeded' || t.useLSP === 'once')) await useLSP(t.timer);
         // niente stamina e niente pozione utilizzabile: tutti i mob restanti di
         // questo target richiedono stamina → inutile provarli a uno a uno (era lo
         // spam "no stam — skip" ×42/ciclo). Esci dal target.
@@ -946,7 +951,7 @@ async function processWave(wave, targets = null, interruptible = false) {
       log(`→ ${mob.name} (${fmtDmg(mob.userdmg)} / ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
       const { dmg, reason } = await fightTarget(
         { monster_id: mob.id }, mob.name, mob.userdmg, t.dmgTarget, t.useLSP, interruptible, true, !!t.exact,
-        t.timer ? null : (() => harvestWaveExp(wave, targets)));
+        t.timer ? null : (() => harvestWaveExp(wave, targets)), t.timer);
       if (reason === 'interrupt') return;             // a timed boss respawned → bail to phase 1
       if (dmg >= t.dmgTarget) {
         const over = dmg - t.dmgTarget;   // residuo oltre il target (≤ 1 colpo da 1 stam)
@@ -969,14 +974,14 @@ async function processDungeon(src) {
   const t = (src.targets || [])[0];
   if (!t || t.enabled === false) return;
   if (stam < 1) {
-    if (t.useLSP) await useLSP();
+    if (t.useLSP) await useLSP(t.timer);
     if (stam < 1) { log(`no stamina — skip dungeon ${src.label}`, '#fa0'); return; }
   }
   const idp = { dgmid: src.dgmid, instance_id: src.instance_id };
   log(`→ 🏰 dungeon ${src.label} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
   // startDmg 0 + knownStart=false → fightTarget learns K on hit #2 (we don't know
   // our prior cumulative damage on this boss; totaldmgdealt gives the real total).
-  const { dmg, reason } = await fightTarget(idp, src.label, 0, t.dmgTarget, t.useLSP, false, false);
+  const { dmg, reason } = await fightTarget(idp, src.label, 0, t.dmgTarget, t.useLSP, false, false, false, null, t.timer);
   if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
     const r = await lootMob(idp);
     log(`${reason === 'dead' ? '☠️' : '✓'} dungeon ${src.label} — ${fmtDmg(dmg)}${r ? ' · loot ✓' : ''}`, '#2f8');
@@ -1038,12 +1043,12 @@ async function processDungeonLocation(src) {
     for (const m of alive) {
       if (paused || !running) break;
       if (stam < 1) {
-        if (t.useLSP) await useLSP();
+        if (t.useLSP) await useLSP(t.timer);
         if (stam < 1) { log(`no stamina — stop 🏰 ${t.key}`, '#fa0'); return; }
       }
       log(`→ 🏰 ${m.name} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
       const idp = { dgmid: m.dgmid, instance_id: m.instance_id };
-      const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact);
+      const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact, null, t.timer);
       if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
         const r = await lootMob(idp);
         _dlLooted.add(m.dgmid);
@@ -1637,9 +1642,9 @@ function renderSettings() {
 
   let h = sectionTitle('How the bot fights');
   h += toggleRow('lspenable', S.lspEnabled,
-        '🧪 Use stamina potions',
-        'Only on timed bosses — farming never uses potions',
-        'Never use potions — natural stamina only');
+        '🧪 Stamina potions while farming',
+        'Timed bosses AND farming use potions',
+        'Only timed bosses use potions — farming runs on natural stamina');
   h += toggleRow('smallhits', S.smallHits,
         '⚔️ Hit style: small &amp; frequent',
         'Many small hits (10–50 stamina) — more free-hit procs',
