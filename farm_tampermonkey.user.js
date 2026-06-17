@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.23.0
+// @version      1.24.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -929,8 +929,23 @@ async function processWave(wave, targets = null, interruptible = false) {
       log(`💀 dead & auto-heal OFF — waiting for HP regen (stop ${t.key})`, '#fa0'); break;
     }
 
+    // quest mobs drink potions unconditionally (must complete the quest); they're
+    // farm-type otherwise. `forcePot` makes useLSP/fightTarget treat them like a timed.
+    const forcePot = !!(t.timer || t.quest);
+
     for (const mob of alive) {
       if (paused || !running) break;
+      // QUEST CAP: stop ENGAGING new mobs once we've damaged `need` distinct ones — the
+      // kill is credited at loot, so engaging more would over-kill (the reported bug:
+      // 7 alive → 7 engaged, respawn → 7 more = 14 for a 10-quest). We still loot the
+      // dead ones above; we just don't start additional mobs.
+      if (t.quest && S.questActive) {
+        const need = S.questActive.need || 10;
+        if ((S.questActive.engaged || 0) >= need) {
+          log(`📜 quest: engaged ${S.questActive.engaged}/${need} mobs — waiting for kills to credit (have ${S.questActive.have || 0})`, '#9cf');
+          break;
+        }
+      }
       // before starting a farm mob, give timed bosses a chance
       if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return; }
 
@@ -941,7 +956,7 @@ async function processWave(wave, targets = null, interruptible = false) {
         // VARIANT B: farm targets first try to harvest exp (loot + wait for expiring
         // mobs → level-up refills stamina) before drinking; timed bosses just drink.
         if (!t.timer) await harvestWaveExp(wave, targets);
-        if (stam < 1 && (t.useLSP === 'asNeeded' || t.useLSP === 'once')) await useLSP(t.timer);
+        if (stam < 1 && (t.useLSP === 'asNeeded' || t.useLSP === 'once')) await useLSP(forcePot);
         // niente stamina e niente pozione utilizzabile: tutti i mob restanti di
         // questo target richiedono stamina → inutile provarli a uno a uno (era lo
         // spam "no stam — skip" ×42/ciclo). Esci dal target.
@@ -951,9 +966,12 @@ async function processWave(wave, targets = null, interruptible = false) {
       log(`→ ${mob.name} (${fmtDmg(mob.userdmg)} / ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
       const { dmg, reason } = await fightTarget(
         { monster_id: mob.id }, mob.name, mob.userdmg, t.dmgTarget, t.useLSP, interruptible, true, !!t.exact,
-        t.timer ? null : (() => harvestWaveExp(wave, targets)), t.timer);
+        t.timer ? null : (() => harvestWaveExp(wave, targets)), forcePot);
       if (reason === 'interrupt') return;             // a timed boss respawned → bail to phase 1
       if (dmg >= t.dmgTarget) {
+        // quest: this mob is now engaged (≥ minDmg) → count it against `need` so we
+        // don't start more than required. Credit still arrives via loot.
+        if (t.quest && S.questActive) S.questActive.engaged = (S.questActive.engaged || 0) + 1;
         const over = dmg - t.dmgTarget;   // residuo oltre il target (≤ 1 colpo da 1 stam)
         if (t.timer) {
           S.timedKills++;
@@ -1168,7 +1186,11 @@ function questWaveFor(q) {
     targets: [{
       key: 'quest', label: q.monster || 'quest mobs', srcName: 'quest',
       match: makeMatch(inc, []), dmgTarget: dmg, exact: true,
-      killLimit: null, useLSP: 'asNeeded', timer: false, enabled: true,
+      // quest:true → (1) always uses potions (like a timed boss, ignores the farm
+      // toggle) and (2) caps engagement at the quest's `need` so it never kills MORE
+      // mobs than required (the kill is credited at LOOT, so we engage exactly `need`
+      // distinct mobs and then just loot them as they die — see processWave).
+      killLimit: null, useLSP: 'asNeeded', timer: false, quest: true, enabled: true,
     }],
   };
 }
@@ -1209,7 +1231,7 @@ async function processQuests() {
           const r = await post('adventurers_accept_quest.php', { quest_id: p.id });
           if (r && r.status === 'ok') {
             S.questTaken++;
-            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, have: 0, need: 10 };
+            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, have: 0, need: 10, engaged: 0 };
             log(`📜 quest accepted: ${p.title}${p.monster ? ` → ${p.monster}` : ''} (min ${fmtDmg(p.minDmg)})`, '#9cf');
           } else log(`quest accept failed (${p.title}): ${r?.message || 'no resp'}`, '#f66');
         } else {
@@ -1217,6 +1239,12 @@ async function processQuests() {
         }
       }
 
+      // carry the local "engaged" count across guild re-reads (same quest id), and never
+      // let it drop below the server-credited `have` → caps over-killing reliably.
+      if (active) {
+        const prev = (S.questActive && S.questActive.id === active.id) ? (S.questActive.engaged || 0) : 0;
+        active.engaged = Math.max(prev, active.have || 0);
+      }
       S.questActive = active;   // cache for the UI + the farm pass below
       save();
     }
@@ -1380,7 +1408,8 @@ function renderStatus() {
       const short = (q.title || '').length > 26 ? q.title.slice(0,26)+'…' : (q.title || 'quest');
       h += `<div style="font-size:12px;margin-bottom:4px;color:#cfa">
         ${esc(short)}<br>&nbsp;&nbsp;→ <span style="color:#7df">${esc(q.monster || 'g5w9 mobs')}</span>
-        <span style="color:#9c6"> ${q.have ?? 0}/${q.need ?? 10}</span></div>`;
+        <span style="color:#9c6"> ${q.have ?? 0}/${q.need ?? 10}</span>
+        <span style="color:#778;font-size:10px"> · engaged ${q.engaged ?? 0}</span></div>`;
     } else {
       h += `<div style="font-size:12px;margin-bottom:4px;color:#777">… all on cooldown (2-day rotation)</div>`;
     }
