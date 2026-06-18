@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.24.0
+// @version      1.25.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -67,6 +67,7 @@ const DEFAULT_CONFIG = [
   ]},
   { id:'g5w11', gate:5, wave:11, enabled:true, targets:[
     { key:'orion',      label:'Orion, Eternal Hunter of Artemis',     include:['orion'],      exclude:[], dmgTarget:500_000_000, killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
+    { key:'g5w11-farm', label:'G5W11 Farm',                          include:[],             exclude:['orion','artemis'], dmgTarget:50_000_000, killLimit:400, useLSP:'asNeeded', timer:false, enabled:true },
   ]},
 ];
 
@@ -122,6 +123,9 @@ const SK = 'veyra_mfarm_v1';
 const defState = () => ({
   kills: {}, attacks: 0, timers: {}, lspInv: null, potInv: {}, started: Date.now(),
   timedKills: 0, timedBy: {}, lspUses: 0, hpHeals: 0, pos: null, config: null,
+  farmSeen: {},            // name → last-seen ts: farm mobs we've encountered, so the
+                           // 🎯 Farming tab lists what we farm even before the 1st kill
+  _g5w11FarmMigrated: false, // one-time: add the g5w11 trash-farm target to existing saves
   paused: false,
   minimized: false,        // panel collapsed state — persists across page reloads
   _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
@@ -182,6 +186,20 @@ if (S._farmLspMigrated !== true) {
   for (const w of (S.config || [])) for (const t of (w.targets || []))
     if (!t.timer && t.useLSP === false) t.useLSP = 'asNeeded';
   S._farmLspMigrated = true; save();
+}
+
+// v1.25.0: g5w11 ora farma i trash come g5w10 (mancava il target farm: c'era solo il
+// boss Orion timed). Inietta g5w11-farm negli install esistenti SENZA richiedere un
+// Reset — 50M/mob, esclude i boss orion+artemis. One-time.
+if (S._g5w11FarmMigrated !== true) {
+  const w = (S.config || []).find(x => x.id === 'g5w11' || /[?&]gate=5&wave=11\b/.test(srcUrl(x) || ''));
+  if (w && !(w.targets || []).some(t => !t.timer)) {
+    (w.targets = w.targets || []).push({
+      key:'g5w11-farm', label:'G5W11 Farm', include:[], exclude:['orion','artemis'],
+      dmgTarget:50_000_000, killLimit:400, useLSP:'asNeeded', timer:false, enabled:true,
+    });
+  }
+  S._g5w11FarmMigrated = true; save();
 }
 
 // compile the runtime waves from the saved config; call again after edits
@@ -892,6 +910,12 @@ async function processWave(wave, targets = null, interruptible = false) {
     // the alive boss's REAL death countdown comes from its battle page (auto-die),
     // not data-expire — refreshTimers() fetches it. Here we just clear it when dead.
     if (t.timer && !aliveM.length) delete liveBoss[t.key];
+    // remember farm mob names we've encountered so the 🎯 Farming tab lists what we're
+    // farming even before the first kill lands (user: "il tab farming si deve
+    // aggiornare con i mostri che farmo").
+    if (!t.timer && !t.quest && t.killLimit != null) {
+      for (const m of matched) if (!isTimedName(m.name)) S.farmSeen[m.name] = Date.now();
+    }
   }
 
   // loot dead mobs matching this pass's targets (timers come from auto-summon cards)
@@ -1256,7 +1280,10 @@ async function processQuests() {
   if (q && (q.have || 0) < (q.need || 10)) {
     status = `📜 quest: ${q.title}`;
     await processWave(questWaveFor(q), null, true);
-    return true;
+    // Reserve stamina (skip the farm pass) ONLY while we still need to ENGAGE more
+    // quest mobs. Once `need` of them are engaged we're just waiting for the loot to
+    // credit (have → need) — don't idle on the quest wave, let Phase 2 farm run.
+    return (q.engaged || 0) < (q.need || 10);
   }
   // an active-but-finishable quest is turned in on the next read → still pending
   return !!(q && q.finishable);
@@ -1422,11 +1449,17 @@ function renderStatus() {
       if (t.killLimit != null && t.match({ name })) return t.killLimit;
     return null;
   };
-  // only NORMAL farm mobs here — timed bosses live in the ⏰ Boss timers block above
-  const killRows = Object.entries(S.kills).filter(([name]) => !isTimedName(name));
+  // only NORMAL farm mobs here — timed bosses live in the ⏰ Boss timers block above.
+  // Union killed mobs with farm mobs we've SEEN (farmSeen) so the tab shows what we
+  // farm even at 0 kills, and updates live as new mob types appear.
+  const farmNames = new Set([...Object.keys(S.kills), ...Object.keys(S.farmSeen || {})]);
+  const killRows = [...farmNames]
+    .filter(name => !isTimedName(name))
+    .map(name => [name, S.kills[name] || 0])
+    .sort((a, b) => b[1] - a[1]);
   if (killRows.length) {
     h += `<div style="color:#0af;font-size:12px;font-weight:bold;margin-bottom:5px">🎯 Farming</div>`;
-    for (const [name, k] of killRows.sort()) {
+    for (const [name, k] of killRows) {
       const lim   = limitForName(name);
       const done  = lim != null && k >= lim;
       const color = done ? '#2f8' : (k > 0 ? '#fa0' : '#555');
