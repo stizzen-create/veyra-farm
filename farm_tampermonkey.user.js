@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.25.0
+// @version      1.26.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1458,7 +1458,11 @@ function renderStatus() {
     .map(name => [name, S.kills[name] || 0])
     .sort((a, b) => b[1] - a[1]);
   if (killRows.length) {
-    h += `<div style="color:#0af;font-size:12px;font-weight:bold;margin-bottom:5px">🎯 Farming</div>`;
+    h += `<div style="color:#0af;font-size:12px;font-weight:bold;margin-bottom:5px;display:flex;align-items:center;gap:6px">
+      <span style="flex:1">🎯 Farming</span>
+      <button data-status-action="reset-farm" title="reset farmed monsters (kills + list)"
+        style="background:#3a2a2a;color:#f99;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px">🗑</button>
+    </div>`;
     for (const [name, k] of killRows) {
       const lim   = limitForName(name);
       const done  = lim != null && k >= lim;
@@ -1951,6 +1955,18 @@ function resetStats() {
   renderUI();
 }
 
+// Reset ONLY the per-mob farm progress: the S.kills counters AND the farmSeen list
+// that drives the 🎯 Farming tab. Separate from resetStats (top counters) so the user
+// can wipe the farmed-monster tallies independently (user: "reset anche per i mostri
+// farmati, icona cestino"). Single click, like the top 🗑.
+function resetFarm() {
+  S.kills = {};
+  S.farmSeen = {};
+  save();
+  log('🗑 mob farmati azzerati', '#9cf');
+  renderUI();
+}
+
 // ── BUILD PANEL ───────────────────────────────────────────────────────────────
 function buildUI() {
   uiPanel = document.createElement('div');
@@ -2003,6 +2019,18 @@ function buildUI() {
 
   uiPanel.append(hdr, uiContent);
   document.body.appendChild(uiPanel);
+
+  // Delegated click handler for buttons INSIDE the status tab. The status tab is
+  // re-rendered every 2s via innerHTML, so a per-button onclick wouldn't survive —
+  // delegate on the stable uiContent element instead. (The settings tab uses its own
+  // uiContent.onclick from wireSettings; the two don't collide — this matches only
+  // [data-status-action], that one only [data-action].)
+  uiContent.addEventListener('click', e => {
+    const b = e.target.closest('[data-status-action]');
+    if (!b) return;
+    e.stopPropagation();
+    if (b.dataset.statusAction === 'reset-farm') resetFarm();
+  });
 
   // restore saved position (left/top) if the panel was dragged before
   if (S.pos && S.pos.left != null) {
