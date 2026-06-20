@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.27.0
+// @version      1.28.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -168,6 +168,7 @@ const defState = () => ({
     cur: null,                  // match_id in corso (guida il loop)
     tokensUsed: 0, wins: 0, losses: 0,
     lastPick: '', lastClass: '', note: '',
+    tokensAvail: null, tokensCheckedAt: 0, gems: null, refillCost: 500, freeChance: null,  // letti da pvp.php
     matches: [],                // {mid, enemyClass, winner}
     db: { classes: {}, my: {} },// il DB che cresce a ogni match
   },
@@ -1432,8 +1433,10 @@ function pvpEndMatch(state) {
 
 async function pvpLoop() {
   while (running) {
-    if (!S.pvp.enabled || paused) { await sleep(800); continue; }
+    // anche da spento aggiorna i token ogni tanto, così il tab li mostra (throttle 60s)
+    if (!S.pvp.enabled || paused) { await pvpRefreshTokens(); await sleep(2000); continue; }
     try {
+      await pvpRefreshTokens();   // tieni il conteggio token fresco mentre gioca
       // riprendi un match già aperto dalla URL della battle page (una sola volta), poi matchmake
       if (!S.pvp.cur && !_pvpUrlConsumed) {
         const m = location.pathname.includes('pvp_battle.php') && new URL(location.href).searchParams.get('match_id');
@@ -1442,8 +1445,10 @@ async function pvpLoop() {
       }
       if (!S.pvp.cur) {
         const mm = await pvpPostJson('pvp_matchmake.php', { ladder: 'solo' });
-        if (mm.status !== 'success') { S.pvp.note = mm.message || 'niente token'; renderPvpPanel(); await sleep(20000); continue; }
-        S.pvp.cur = String(mm.match_id); S.pvp.tokensUsed++; save(); await sleep(400); continue;
+        if (mm.status !== 'success') { S.pvp.note = mm.message || 'niente token'; pvpTabRefresh(); await sleep(20000); continue; }
+        if (mm.token_free_chance != null) S.pvp.freeChance = mm.token_free_chance;
+        if (mm.token_free_proc) S.pvp.note = '🎟 token GRATIS (proc)!';
+        S.pvp.cur = String(mm.match_id); S.pvp.tokensUsed++; pvpRefreshTokens(true); save(); await sleep(400); continue;
       }
       const s = await pvpState(S.pvp.cur);
       if (!s.match) { if (++_pvpStale > 3) { S.pvp.cur = null; _pvpStale = 0; } await sleep(700); continue; }
@@ -1451,7 +1456,7 @@ async function pvpLoop() {
       const enemyU = Object.values(s.teams?.enemy?.players_by_num || {})[0];
       S.pvp.lastClass = enemyU?.advanced_class_name || '';
       pvpLearn(S.pvp.cur, s, s.new_logs);
-      if (s.match.ended) { pvpEndMatch(s); renderPvpPanel(); continue; }
+      if (s.match.ended) { pvpEndMatch(s); pvpRefreshTokens(true); pvpTabRefresh(); continue; }
       if (s.turn?.side === 'ally') {              // solo: l'unico alleato sono io → mio turno
         const rageBefore = s.me?.advanced_resource || 0;
         const p = pvpPick(s); if (!p) { await sleep(500); continue; }
@@ -1469,57 +1474,86 @@ async function pvpLoop() {
       }
       if (Date.now() - _pvpLastSave > 10000) { save(); _pvpLastSave = Date.now(); }  // persisti il DB imparato (throttle)
     } catch (e) { S.pvp.note = 'err: ' + e.message; await sleep(600); }
-    renderPvpPanel();
+    pvpTabRefresh();
   }
 }
 
-// ── PvP PANEL (solo sulle pagine PvP) ────────────────────────────────────────────
-let pvpPanel = null, pvpBody = null;
-function buildPvpPanel() {
-  pvpPanel = document.createElement('div');
-  Object.assign(pvpPanel.style, {
-    position: 'fixed', top: '8px', right: '8px',
-    width: 'min(300px, calc(100vw - 16px))', boxSizing: 'border-box',
-    background: '#0d0d18', border: '1px solid #6a2a4c', borderRadius: '10px',
-    zIndex: '2147483647', fontFamily: 'monospace', fontSize: '12px',
-    boxShadow: '0 4px 28px #0009', color: '#ccc',
-  });
-  pvpPanel.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#2a1626;border-radius:10px 10px 0 0">
-      <span style="color:#ff5c8a;font-weight:bold">⚔ AutoPvP <span style="color:#667;font-weight:normal;font-size:10px">by UANM</span></span>
-      <button id="pvp-toggle" style="border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:bold"></button>
-    </div>
-    <div id="pvp-body" style="padding:8px 10px"></div>`;
-  document.body.appendChild(pvpPanel);
-  pvpBody = pvpPanel.querySelector('#pvp-body');
-  pvpPanel.querySelector('#pvp-toggle').addEventListener('click', () => {
-    S.pvp.enabled = !S.pvp.enabled; S.pvp.note = S.pvp.enabled ? 'avvio…' : 'off'; save(); renderPvpPanel();
-    log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON' : 'OFF'}`, '#ff5c8a');
-  });
-  renderPvpPanel();
+// ── PvP TAB (nel pannello principale ⚔ PvP) ──────────────────────────────────────
+// legge i token PvP (e i gem) dalla lobby pvp.php — "Solo Tokens: N" + costo refill.
+let _pvpTokTs = 0;
+async function pvpRefreshTokens(force) {
+  if (!force && Date.now() - _pvpTokTs < 60000) return;
+  _pvpTokTs = Date.now();
+  const html = await getHtml(`${BASE}/pvp.php`);
+  if (!html) return;
+  const tok = html.match(/Solo Tokens:\s*<\/strong>\s*<span>\s*([\d]+)/i)
+           || html.match(/Tokens:\s*<\/strong>\s*<span>\s*([\d]+)/i);
+  if (tok) S.pvp.tokensAvail = parseInt(tok[1]);
+  const cost = html.match(/Refill Solo Tokens \(([\d,]+) Gems\)/i);
+  if (cost) S.pvp.refillCost = parseInt(cost[1].replace(/,/g, ''));
+  S.pvp.tokensCheckedAt = Date.now();
+  save();
+  if (activeTab === 'pvp') renderUI();
 }
-function renderPvpPanel() {
-  if (!pvpBody) return;
+// refresh the PvP tab live if it's the open tab
+function pvpTabRefresh() { if (activeTab === 'pvp') renderUI(); }
+
+// the ⚔ PvP tab body — ON/OFF + all match stats + tokens
+function renderPvp() {
   const p = S.pvp;
-  const btn = pvpPanel.querySelector('#pvp-toggle');
-  btn.textContent = p.enabled ? '⏸ ON' : '▶ OFF';
-  btn.style.background = p.enabled ? '#1f8a4c' : '#252540';
-  btn.style.color = '#fff';
-  const classes = Object.keys(p.db.classes || {});
-  pvpBody.innerHTML = `
-    <div style="margin-bottom:6px;color:${p.enabled ? '#7df' : '#888'}">${p.enabled ? '▶ gioco solo automatico' : '⏸ manuale (premi ON)'}</div>
-    <div>🎟 token usati: <b>${p.tokensUsed}</b> · ✅ <b style="color:#2f8">${p.wins}</b>W / <b style="color:#f88">${p.losses}</b>L</div>
-    <div>🆚 classe: <b>${p.lastClass || '—'}</b></div>
-    <div>🎯 mossa: <b>${p.lastPick || '—'}</b></div>
-    <div style="color:#9c6;margin-top:3px">📚 classi: ${classes.length} <span style="color:#667;font-size:10px">${classes.join(', ')}</span></div>
-    ${p.note ? `<div style="color:#fa8;font-size:11px;margin-top:2px">${p.note}</div>` : ''}
-    <button id="pvp-export" style="margin-top:7px;background:#252540;color:#ccc;border:none;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px">⬇ esporta DB (console+clipboard)</button>`;
-  const ex = pvpBody.querySelector('#pvp-export');
-  if (ex) ex.addEventListener('click', () => {
-    const j = JSON.stringify(S.pvp.db, null, 2);
-    console.log(j); try { navigator.clipboard.writeText(j); } catch {}
-    log('PvP DB → console + clipboard', '#9cf');
-  });
+  const total = p.wins + p.losses;
+  const wr = total ? Math.round(p.wins / total * 100) : 0;
+  const tokAge = p.tokensCheckedAt ? fmt(Date.now() - p.tokensCheckedAt) + ' fa' : 'mai';
+  // per-class breakdown (matches + losses learned)
+  const rows = Object.values(p.db.classes || {}).sort((a, b) => (b.matches || 0) - (a.matches || 0)).map(c => {
+    const m = c.matches || 0, l = c.losses || 0, w = m - l;
+    const nSk = Object.keys(c.skills || {}).length, nEf = Object.keys(c.effects || {}).length;
+    return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+      <span style="color:#cda">${esc(c.class || '?')}</span>
+      <span style="color:#778">${w}/${l} · ${nSk}sk ${nEf}fx</span></div>`;
+  }).join('');
+  const recent = (p.matches || []).slice(-6).reverse().map(m =>
+    `<span style="color:${m.winner === 'ally' ? '#2f8' : '#f88'}">${m.winner === 'ally' ? 'W' : 'L'}</span>`).join(' ');
+  return `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <button data-pvp-action="toggle" style="flex:1;border:none;border-radius:6px;padding:7px 0;cursor:pointer;
+        font-size:13px;font-weight:bold;color:#fff;background:${p.enabled ? '#1f8a4c' : '#7a2540'}">
+        ${p.enabled ? '⏸ AutoPvP ON — tocca per FERMARE' : '▶ AutoPvP OFF — tocca per AVVIARE'}</button>
+    </div>
+    <div style="color:${p.enabled ? '#7df' : '#888'};font-size:11px;margin-bottom:7px">
+      ${p.enabled ? '▶ gioca solo automatico (matchmake + max danno)' : '⏸ manuale — gioca tu a mano'}
+      ${p.note ? `· <span style="color:#fa8">${esc(p.note)}</span>` : ''}</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:8px">
+      <div>🎟 token disp.: <b style="color:${(p.tokensAvail|0) > 0 ? '#0cf' : '#f66'}">${p.tokensAvail != null ? p.tokensAvail : '?'}</b></div>
+      <div>🍀 chance free: <b>${p.freeChance != null ? Math.round(p.freeChance * 100) + '%' : '?'}</b></div>
+      <div>♻ refill: <b>${(p.refillCost || 500).toLocaleString()} gem</b></div>
+      <div style="color:#667;font-size:10px">letto ${tokAge}</div>
+    </div>
+    <div style="color:#667;font-size:10px;margin:-4px 0 8px">nessuna ricarica a timer: i token tornano col refill a gem o con la chance "free" a inizio match</div>
+
+    <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px">
+      <div>✅ vinti: <b style="color:#2f8">${p.wins}</b></div>
+      <div>❌ persi: <b style="color:#f88">${p.losses}</b></div>
+      <div>🏆 winrate: <b>${wr}%</b></div>
+      <div>🎟 spesi (sess.): <b>${p.tokensUsed}</b></div>
+    </div>
+    <div style="font-size:11px;color:#9ab;margin-bottom:6px">ultimi: ${recent || '—'}</div>
+    <div style="font-size:11px;margin-bottom:3px">🆚 ora: <b>${esc(p.lastClass || '—')}</b> · 🎯 <b>${esc(p.lastPick || '—')}</b></div>
+
+    <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
+    <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classi imparate (${Object.keys(p.db.classes||{}).length})
+      <span style="color:#667;font-weight:normal;font-size:10px">· W/L · skill · effetti</span></div>
+    ${rows || '<div style="color:#667;font-size:11px">nessuna ancora — avvia o gioca un match</div>'}
+
+    <div style="display:flex;gap:6px;margin-top:9px">
+      <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 aggiorna token</button>
+      <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ esporta DB</button>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px;color:#9ab;cursor:pointer">
+      <input type="checkbox" data-pvp-action="survive" ${p.survive ? 'checked' : ''}> sopravvivenza: a Rage piena e HP&lt;${p.surviveAtPct}% usa difesa invece del nuke
+    </label>`;
 }
 
 async function mainLoop() {
@@ -1531,8 +1565,8 @@ async function mainLoop() {
     // state is persisted (S.paused), so a page reload (e.g. after a potion) stays
     // paused instead of silently resuming.
     if (paused) { status = '⏸ paused — manual play'; await sleep(600); renderUI(); continue; }
-    // Sulle pagine PvP il farm non ha nulla da fare: lascia il controllo al modulo AutoPvP.
-    if (PVP_PAGE) { status = '⚔ pagina PvP — farm in pausa'; await sleep(2000); renderUI(); continue; }
+    // AutoPvP ON → il farm cede il controllo al modulo PvP (evita conflitti di fetch).
+    if (S.pvp.enabled) { status = '⚔ AutoPvP attivo — farm in pausa'; await sleep(2000); renderUI(); continue; }
     if (!invLoaded) { await refreshInv(); invLoaded = true; }
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
@@ -2170,7 +2204,9 @@ function wireSettings() {
 function renderUI() {
   if (!uiContent || minimized) return;
   if (activeTab === 'settings') return;   // Settings owns its DOM (live inputs) — don't clobber
-  uiContent.innerHTML = activeTab === 'log' ? renderLog() : renderStatus();
+  uiContent.innerHTML = activeTab === 'pvp' ? renderPvp()
+                      : activeTab === 'log' ? renderLog()
+                      : renderStatus();
 }
 
 // Reset ONLY the top counters (uptime, boss kills, heals, potions used, attacks,
@@ -2221,13 +2257,16 @@ function buildUI() {
   });
   hdr.innerHTML = `
     <span style="color:#9060ff;font-weight:bold;font-size:12px">⚔ Veyra Farm <span style="color:#667;font-weight:normal;font-size:10px">by UANM</span></span>
-    <span style="display:flex;gap:4px;align-items:center">
+    <span style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
       <button id="vfb-tab-s" style="background:#9060ff;color:#fff;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">Status</button>
       <button id="vfb-tab-l" style="background:#252540;color:#aaa;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">📋 Log</button>
       <button id="vfb-tab-g" style="background:#252540;color:#aaa;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚙ Setup</button>
+      <button id="vfb-tab-pvp" title="Auto-PvP: ON/OFF + statistiche match + token"
+        style="background:#252540;color:#aaa;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚔PvP</button>
       <button id="vfb-r" title="reset stats (boss/heals/uptime — keeps farm kills)"
         style="background:#252540;color:#ccc;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px">🗑</button>
@@ -2258,9 +2297,30 @@ function buildUI() {
   // [data-status-action], that one only [data-action].)
   uiContent.addEventListener('click', e => {
     const b = e.target.closest('[data-status-action]');
-    if (!b) return;
+    if (b) {
+      e.stopPropagation();
+      if (b.dataset.statusAction === 'reset-farm') resetFarm();
+      return;
+    }
+    // ⚔ PvP tab actions
+    const pb = e.target.closest('[data-pvp-action]');
+    if (!pb) return;
     e.stopPropagation();
-    if (b.dataset.statusAction === 'reset-farm') resetFarm();
+    const a = pb.dataset.pvpAction;
+    if (a === 'toggle') {
+      S.pvp.enabled = !S.pvp.enabled; S.pvp.note = S.pvp.enabled ? 'avvio…' : 'off';
+      if (S.pvp.enabled) _pvpUrlConsumed = false;    // ricomincia a leggere la URL del match
+      save(); renderUI();
+      log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON' : 'OFF'}${S.pvp.enabled ? ' — il farm va in pausa' : ''}`, '#ff5c8a');
+    } else if (a === 'tokens') {
+      pvpRefreshTokens(true);
+    } else if (a === 'export') {
+      const j = JSON.stringify(S.pvp.db, null, 2);
+      console.log(j); try { navigator.clipboard.writeText(j); } catch {}
+      log('⚔ PvP DB → console + clipboard', '#9cf');
+    } else if (a === 'survive') {
+      S.pvp.survive = !!pb.checked; save();
+    }
   });
 
   // restore saved position (left/top) if the panel was dragged before
@@ -2280,11 +2340,14 @@ function buildUI() {
     sel('vfb-tab-s', t === 'status');
     sel('vfb-tab-l', t === 'log');
     sel('vfb-tab-g', t === 'settings');
+    sel('vfb-tab-pvp', t === 'pvp');
     if (t === 'settings') renderSettings();
     else renderUI();
+    if (t === 'pvp') pvpRefreshTokens(true);   // mostra subito i token aggiornati
   }
   document.getElementById('vfb-tab-s').onclick = e => { e.stopPropagation(); setTab('status'); };
   document.getElementById('vfb-tab-l').onclick = e => { e.stopPropagation(); setTab('log'); };
+  document.getElementById('vfb-tab-pvp').onclick = e => { e.stopPropagation(); setTab(activeTab === 'pvp' ? 'status' : 'pvp'); };
   // ⚙ toggles Settings open/closed (closing returns to Status)
   document.getElementById('vfb-tab-g').onclick = e => {
     e.stopPropagation();
@@ -2380,7 +2443,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.27.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.28.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
@@ -2395,13 +2458,12 @@ function init() {
       log(`📋 ${w.id} · ${t.timer ? '⏰' : '🎯'} ${t.label} → stop@${fmtDmg(t.dmgTarget)}${t.killLimit != null ? ` ·${t.killLimit}k` : ''}${(t.include && t.include.length) ? ` inc[${t.include.join(',')}]` : ''}${(t.exclude && t.exclude.length) ? ` exc[${t.exclude.join(',')}]` : ''}`, '#cb8');
     }
   }
-  // AUTO-PvP: solo sulle pagine /pvp.php e /pvp_battle.php → pannello dedicato + loop.
-  // enabled persiste; il farm resta in pausa qui (vedi guardia in mainLoop).
-  if (PVP_PAGE) {
-    buildPvpPanel();
-    log(`⚔ AutoPvP pronto · ${S.pvp.enabled ? 'ON (auto)' : 'OFF (premi ON)'} · classi imparate: ${Object.keys(S.pvp.db.classes || {}).length}`, '#ff5c8a');
-    pvpLoop().catch(e => console.error('[AutoPvP]', e));
-  }
+  // AUTO-PvP: tab ⚔ PvP nel pannello (su ogni pagina). Il loop gira sempre ma agisce solo
+  // quando S.pvp.enabled è ON; allora il farm va in pausa (guardia in mainLoop). Da spento
+  // aggiorna comunque il conteggio token per il tab.
+  log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON (auto)' : 'OFF (apri il tab ⚔ PvP)'} · classi imparate: ${Object.keys(S.pvp.db.classes || {}).length}`, '#ff5c8a');
+  pvpRefreshTokens(true);
+  pvpLoop().catch(e => console.error('[AutoPvP]', e));
   mainLoop().catch(e => console.error('[FarmBot]', e));
 }
 
