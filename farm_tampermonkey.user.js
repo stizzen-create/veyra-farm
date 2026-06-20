@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.33.0
+// @version      1.34.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1431,31 +1431,42 @@ function pvpPick(state) {
     .sort((a, b) => pvpRageCost(a, max) - pvpRageCost(b, max))[0];
   if (lethal) { S.pvp.note = 'lethal'; return { id: lethal.id, tk: enemy.key }; }
   const ragnarok = skills.find(k => String(k.id) === 'adv:8' || /ragnarok/i.test(k.name));
-  const atFull = rage >= max;
-  // 2) PREVEDI il nuke avversario: l'ultimate nemico parte quando la SUA risorsa è piena
-  //    (es. l'ASSASSIN ha un nuke fortissimo appena è a risorsa piena). Brace con Ironclad
-  //    (+DEF) PRIMA che il colpo arrivi — NON serve che io sia a Rage piena: anche l'Ironclad
-  //    base alza la difesa (a Rage piena è la versione potenziata, +DEF e 2 turni). Non lo
-  //    ri-casto se ho già un buff difensivo attivo (non sprecare turni).
-  //    NB: il Berserker a HP bassi fa PIÙ danno e ruba PIÙ vita → NON ci si difende per poca
-  //    vita, ci si difende SOLO per anticipare il nuke nemico.
-  const eMax = enemy.advanced_resource_max || 0;
-  const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax;
+  const warAura  = skills.find(k => /warrior aura/i.test(k.name));
+  const atFull   = rage >= max;
+  const enemyFx  = enemy.effects || [];
+  const enemyStunned = enemyFx.some(e => /stun/i.test(e.name || e.label || e.key || ''));        // non potrà colpire
+  const shredUp      = enemyFx.some(e => /defense change|defen|armor|shred|break|aura/i.test(e.name || e.label || e.key || '')); // mia Warrior Aura attiva sul nemico
   const myEffects = Object.values(state.teams?.ally?.players_by_num || {})[0]?.effects || [];
-  const haveDef = myEffects.some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
-  // STRATEGIA PER CLASSE: contro un CURATORE puro (Saint/Inquisitor) NON sprecare turni in
-  // difesa — ogni turno non offensivo gli lascia recuperare con le cure: tieni la pressione e
-  // brucia attraverso le cure. Brace solo contro classi NUKER (Assassin & co.) o classi ignote.
+  const haveDef   = myEffects.some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
+
+  // 2) BRACE — anticipa il nuke avversario: l'ultimate nemico parte quando la SUA risorsa è
+  //    piena (es. l'ASSASSIN). A Rage piena l'Ironclad è la versione potenziata (+DEF, 2 turni).
+  //    SALTA il brace se: il nemico è STUNNATO (non può colpire → vai di danno), è un CURATORE
+  //    puro (ogni turno difensivo gli lascia curare → resta aggressivo), o ho già un buff DEF.
+  //    NB: il Berserker a HP bassi fa PIÙ danno e ruba PIÙ vita → non ci si difende per poca vita.
+  const eMax = enemy.advanced_resource_max || 0;
+  const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax && !enemyStunned;
   const braceWorthIt = prof.bursty || !prof.C;        // nuker, o classe mai vista (prudenza)
   if (S.pvp.survive && enemyNukeReady && !haveDef && braceWorthIt) {
-    const def = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /aura|guard/i.test(k.name));
+    const def = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /guard/i.test(k.name));
     if (def) { S.pvp.note = 'brace(' + (prof.bursty ? cls + ' nuke' : 'nuke') + ')'; return { id: def.id, tk: enemy.key }; }
   }
-  // 3) Rage piena → Ragnarok (massimo danno e miglior danno/Rage; a HP bassi colpisce ancora
-  //    più forte e cura di più). Il burst batte i curatori: le loro cure non tengono il passo.
-  if (atFull && ragnarok) { S.pvp.note = prof.healer ? 'ragnarok@full (vs healer: burst)' : 'ragnarok@full'; return { id: ragnarok.id, tk: enemy.key }; }
-  // 4) altrimenti carica Rage con Slash (gratis, +25, alza anche il moltiplicatore Rage Engine)
-  S.pvp.note = 'build';
+
+  // 3) COMBO DANNO MASSIMO (Warrior Aura → Ragnarok): Warrior Aura apre la DIFESA nemica
+  //    (def-shred) e intanto carica la Rage; poi Ragnarok colpisce a difesa abbassata = molto
+  //    più danno. A Rage piena: se lo shred è già su → Ragnarok; altrimenti prima Warrior Aura
+  //    (a Rage piena dura di più e, per il cap, la Rage resta piena) → Ragnarok il turno dopo.
+  if (atFull && ragnarok) {
+    if (shredUp || !warAura) { S.pvp.note = shredUp ? 'ragnarok (def shredded)' : (prof.healer ? 'ragnarok (vs healer)' : 'ragnarok@full'); return { id: ragnarok.id, tk: enemy.key }; }
+    S.pvp.note = 'war aura → shred def → ragnarok next';
+    return { id: warAura.id, tk: enemy.key };
+  }
+  // 4) BUILD verso Rage piena. Ogni turno la Rage sale di +25 QUALUNQUE skill usi (visto nei
+  //    log: "gains 25 Rage"), quindi costruisco con WARRIOR AURA: ricarica come tutto il resto E
+  //    tiene aperto lo shred difesa nemica, così quando arrivo a 100 il Ragnarok colpisce già a
+  //    difesa abbassata. Slash solo se per qualche motivo non posso permettermi Warrior Aura.
+  if (warAura && rage >= pvpRageCost(warAura, max)) { S.pvp.note = 'build + shred (war aura)'; return { id: warAura.id, tk: enemy.key }; }
+  S.pvp.note = 'build (slash)';
   const slash = skills.find(k => String(k.id) === '0') || skills[skills.length - 1];
   return { id: slash.id, tk: enemy.key };
 }
@@ -1565,6 +1576,10 @@ function renderPvp() {
   const total = p.wins + p.losses;
   const wr = total ? Math.round(p.wins / total * 100) : 0;
   const tokAge = p.tokensCheckedAt ? fmt(Date.now() - p.tokensCheckedAt) + ' ago' : 'never';
+  // i token si ricaricano +3 ogni ora (allo scoccare dell'ora) → countdown al prossimo refill
+  const _now = new Date();
+  const _toHourMs = ((59 - _now.getMinutes()) * 60 + (60 - _now.getSeconds())) * 1000;
+  const nextRefill = fmt(_toHourMs);
   // per-class breakdown (matches + losses learned)
   const rows = Object.values(p.db.classes || {}).sort((a, b) => (b.matches || 0) - (a.matches || 0)).map(c => {
     const m = c.matches || 0, l = c.losses || 0, w = m - l;
@@ -1589,13 +1604,13 @@ function renderPvp() {
       ${p.enabled ? '▶ auto-playing (matchmake + max damage)' : '⏸ manual — play by hand'}
       ${p.note ? `· <span style="color:#fa8">${esc(p.note)}</span>` : ''}</div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:8px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px">
       <div>🎟 tokens left: <b style="color:${(p.tokensAvail|0) > 0 ? '#0cf' : '#f66'}">${p.tokensAvail != null ? p.tokensAvail : '?'}</b></div>
-      <div>🍀 free chance: <b>${p.freeChance != null ? Math.round(p.freeChance * 100) + '%' : '?'}</b></div>
-      <div>♻ refill: <b>${(p.refillCost || 500).toLocaleString()} gems</b> <span style="color:#777">(manual)</span></div>
+      <div>⏳ +3 in <b>${nextRefill}</b></div>
+      <div title="chance that a match does NOT consume a token">🍀 free token: <b>${p.freeChance != null ? Math.round(p.freeChance * 100) + '%' : '?'}</b></div>
       <div style="color:#667;font-size:10px">read ${tokAge}</div>
     </div>
-    <div style="color:#667;font-size:10px;margin:-4px 0 8px">the bot NEVER spends gems — when tokens run out it just idles. They come back only via the "free" chance at match start (or your own manual refill).</div>
+    <div style="color:#667;font-size:10px;margin:-2px 0 8px">+3 tokens recharge every hour (top of the hour). 🍀 free token = chance a match doesn't spend a token. The bot NEVER refills with gems (manual ${(p.refillCost||500).toLocaleString()}-gem button only) — it idles when out of tokens.</div>
 
     <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px">
@@ -2509,7 +2524,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.33.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.34.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
