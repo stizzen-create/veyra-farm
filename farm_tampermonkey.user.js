@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.35.0
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
+// @version      1.36.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1424,47 +1424,75 @@ function pvpPick(state) {
   const ehp = enemy.hp || 1e9;
   const cls = enemy.advanced_class_name || 'Unknown';
   const prof = pvpProfile(cls);   // {healer, bursty} imparato dai match precedenti
-  const dmgOf = k => { const e = S.pvp.db.my[k.name]; return e ? e.maxDmg : 0; };
-  const usable = skills.filter(k => rage >= pvpRageCost(k, max));
-  // 1) letale: la skill d'attacco usabile più economica che uccide ORA (danno imparato ≥ HP nemico)
-  const lethal = usable.filter(k => k.type === 'attack' && dmgOf(k) >= ehp)
-    .sort((a, b) => pvpRageCost(a, max) - pvpRageCost(b, max))[0];
-  if (lethal) { S.pvp.note = 'lethal'; return { id: lethal.id, tk: enemy.key }; }
-  const ragnarok = skills.find(k => String(k.id) === 'adv:8' || /ragnarok/i.test(k.name));
-  const warAura  = skills.find(k => /warrior aura/i.test(k.name));
-  const atFull   = rage >= max;
-  const enemyFx  = enemy.effects || [];
-  const enemyStunned = enemyFx.some(e => /stun/i.test(e.name || e.label || e.key || ''));        // non potrà colpire
-  const shredUp      = enemyFx.some(e => /defense change|defen|armor|shred|break|aura/i.test(e.name || e.label || e.key || '')); // mia Warrior Aura attiva sul nemico
-  const myEffects = Object.values(state.teams?.ally?.players_by_num || {})[0]?.effects || [];
-  const haveDef   = myEffects.some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
+  const atFull = rage >= max;
+  // danno IMPARATO di una mia skill nel bucket di Rage che vale ADESSO: a Rage piena uso la
+  // variante potenziata (byRage.full, es. Ragnarok@full=1.2M), altrimenti la partial. Se non
+  // l'ho mai vista → null (vale "da provare per impararla").
+  const dmgOf = k => {
+    const e = S.pvp.db.my[k && k.name]; if (!e) return null;
+    const b = e.byRage || {};
+    const v = atFull ? (b.full && b.full.maxDmg) : (b.partial && b.partial.maxDmg);
+    return v || e.maxDmg || 0;
+  };
+  // lanciabili ORA: skill d'attacco con Rage ≥ costo effettivo (le full-resource servono la barra piena)
+  const usable = skills.filter(k => k.type === 'attack' && rage >= pvpRageCost(k, max));
 
-  // 2) BRACE — anticipa il nuke avversario: l'ultimate nemico parte quando la SUA risorsa è
-  //    piena (es. l'ASSASSIN). A Rage piena l'Ironclad è la versione potenziata (+DEF, 2 turni).
-  //    SALTA il brace se: il nemico è STUNNATO (non può colpire → vai di danno), è un CURATORE
-  //    puro (ogni turno difensivo gli lascia curare → resta aggressivo), o ho già un buff DEF.
-  //    NB: il Berserker a HP bassi fa PIÙ danno e ruba PIÙ vita → non ci si difende per poca vita.
+  // 1) LETALE: la skill usabile più economica il cui danno imparato uccide ORA (≥ HP nemico)
+  const lethal = usable.filter(k => (dmgOf(k) || 0) >= ehp)
+    .sort((a, b) => pvpRageCost(a, max) - pvpRageCost(b, max))[0];
+  if (lethal) { S.pvp.note = 'lethal ' + lethal.name; return { id: lethal.id, tk: enemy.key }; }
+
+  const enemyFx = enemy.effects || [];
+  const enemyStunned = enemyFx.some(e => /stun/i.test(e.name || e.label || e.key || ''));
+  const shredUp      = enemyFx.some(e => /defense change|defen|armor|shred|break/i.test(e.name || e.label || e.key || ''));
+  const haveDef = (Object.values(state.teams?.ally?.players_by_num || {})[0]?.effects || [])
+    .some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
+
+  // 2) BRACE (sopravvivenza) — l'ultimate nemico parte quando la SUA risorsa è piena: se sta per
+  //    nukare, è un matchup pericoloso e non ho già DEF su → poppa Ironclad/guard. (regola tenuta)
   const eMax = enemy.advanced_resource_max || 0;
   const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax && !enemyStunned;
-  const braceWorthIt = prof.bursty || !prof.C;        // nuker, o classe mai vista (prudenza)
-  if (S.pvp.survive && enemyNukeReady && !haveDef && braceWorthIt) {
+  if (S.pvp.survive && enemyNukeReady && !haveDef && (prof.bursty || !prof.C)) {
     const def = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /guard/i.test(k.name));
-    if (def) { S.pvp.note = 'brace(' + (prof.bursty ? cls + ' nuke' : 'nuke') + ')'; return { id: def.id, tk: enemy.key }; }
+    if (def) { S.pvp.note = 'brace(' + cls + ' nuke)'; return { id: def.id, tk: enemy.key }; }
   }
 
-  // 3) COMBO DANNO MASSIMO (Warrior Aura → Ragnarok): Warrior Aura apre la DIFESA nemica
-  //    (def-shred) e intanto carica la Rage; poi Ragnarok colpisce a difesa abbassata = molto
-  //    più danno. A Rage piena: se lo shred è già su → Ragnarok; altrimenti prima Warrior Aura
-  //    (a Rage piena dura di più e, per il cap, la Rage resta piena) → Ragnarok il turno dopo.
-  if (atFull && ragnarok) {
-    if (shredUp || !warAura) { S.pvp.note = shredUp ? 'ragnarok (def shredded)' : (prof.healer ? 'ragnarok (vs healer)' : 'ragnarok@full'); return { id: ragnarok.id, tk: enemy.key }; }
-    S.pvp.note = 'war aura → shred def → ragnarok next';
-    return { id: warAura.id, tk: enemy.key };
+  // 3) RAGE PIENA → scarica la barra sul mio MIGLIOR nuke imparato (Ragnarok). MAI Slash: la barra
+  //    è turn-based, se non la spendo ORA si azzera → finestra persa (era IL bug dei 15 slash@full).
+  if (atFull) {
+    const best = usable.filter(k => dmgOf(k) != null).sort((a, b) => (dmgOf(b) || 0) - (dmgOf(a) || 0))[0];
+    if (best) { S.pvp.note = best.name + '@full'; return { id: best.id, tk: enemy.key }; }
+    const fullSk = usable.find(k => k.requires_full_resource);   // mai vista: provala per impararla
+    if (fullSk) { S.pvp.note = 'try ' + fullSk.name + '@full'; return { id: fullSk.id, tk: enemy.key }; }
   }
-  // 4) BUILD verso Rage piena con SLASH. La Rage sale ogni turno, ma Warrior Aura NON fa danno
-  //    (costa 6, solo lo shred) → buildare con lei = turni a zero danno, perdi la gara di DPS.
-  //    Slash invece fa danno E carica Rage. Warrior Aura si usa UNA volta a Rage piena (punto 3)
-  //    per aprire la difesa subito prima del Ragnarok, non come builder.
+
+  // un nuke a Rage piena lo conosco? (per decidere se vale la pena caricare con Slash)
+  const haveNuke = Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n)) || skills.some(k => k.requires_full_resource);
+  const warAura  = usable.find(k => /warrior aura/i.test(k.name));
+
+  // 4) STO PER RIEMPIRE (≥70%) → apri la difesa col Warrior Aura il turno PRIMA del nuke, così
+  //    Ragnarok il turno dopo colpisce a difesa abbassata. Solo se conosco un nuke e non sto vs healer.
+  if (!atFull && rage >= max * 0.7 && warAura && !shredUp && haveNuke && !prof.healer) {
+    S.pvp.note = 'war aura (shred pre-nuke)'; return { id: warAura.id, tk: enemy.key };
+  }
+
+  // 5) SOTTO PIENA → miglior colpo che mi posso permettere, guidato dal DB. Stima la cura-per-colpo
+  //    IMPARATA del nemico: se lo Slash ci rende ancora (netto>0) e ho un nuke da caricare → builda
+  //    con Slash verso il pieno; altrimenti (es. guaritore che supera lo Slash) picchia col miglior
+  //    colpo netto conosciuto (Ironclad/Power Slash) invece di restare fermo su Slash.
+  const healHit = (prof.healer && prof.C) ? (prof.C.healed || 0) / Math.max(1, (prof.C.matches || 1) * 6) : 0;
+  const slashNet = (dmgOf({ name: 'Slash' }) || 0) - healHit;
+  if (haveNuke && slashNet > 0) {
+    const sl = skills.find(k => String(k.id) === '0');
+    if (sl) { S.pvp.note = 'build (slash→nuke)'; return { id: sl.id, tk: enemy.key }; }
+  }
+  const hitters = usable.filter(k => !k.requires_full_resource)
+    .map(k => ({ k, net: (dmgOf(k) || 0) - healHit, known: dmgOf(k) != null }))
+    .sort((a, b) => b.net - a.net);
+  const top = hitters.find(h => h.known && h.net > 0) || hitters.find(h => !h.known);
+  if (top) { S.pvp.note = (top.known ? 'best ' : 'probe ') + top.k.name; return { id: top.k.id, tk: enemy.key }; }
+
+  // 6) FALLBACK: Slash (builder più economico) — carica Rage verso il prossimo nuke a barra piena.
   S.pvp.note = 'build (slash)';
   const slash = skills.find(k => String(k.id) === '0') || skills[skills.length - 1];
   return { id: slash.id, tk: enemy.key };
