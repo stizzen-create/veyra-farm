@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.28.0
+// @version      1.29.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -163,8 +163,10 @@ const defState = () => ({
   // le mie skill, incl. l'effetto POTENZIATO a Rage piena). enabled=false → giochi a mano.
   pvp: {
     enabled: false,             // toggle ON/OFF (così puoi giocare a mano)
-    survive: true,              // a Rage piena, se HP basso usa una skill difensiva potenziata invece del nuke
-    surviveAtPct: 25,           // soglia HP% sotto cui preferire la difesa
+    survive: true,              // brace: quando la risorsa NEMICA è piena (sta per nukeare), a Rage
+                                // piena usa una skill difensiva potenziata (Ironclad +DEF) invece del nuke.
+                                // NB: il Berserker a HP bassi fa più danno e cura di più → non ci si
+                                // difende per poca vita, solo per anticipare il nuke avversario.
     cur: null,                  // match_id in corso (guida il loop)
     tokensUsed: 0, wins: 0, losses: 0,
     lastPick: '', lastClass: '', note: '',
@@ -1393,8 +1395,6 @@ function pvpPick(state) {
   const enemy = Object.values(state.teams?.enemy?.players_by_num || {}).find(u => u.alive);
   if (!enemy) return null;
   const ehp = enemy.hp || 1e9;
-  const myUnit = Object.values(state.teams?.ally?.players_by_num || {})[0] || {};
-  const myHpPct = myUnit.hp_max ? (myUnit.hp / myUnit.hp_max * 100) : 100;
   const dmgOf = k => { const e = S.pvp.db.my[k.name]; return e ? e.maxDmg : 0; };
   const usable = skills.filter(k => rage >= pvpRageCost(k, max));
   // 1) letale: la skill d'attacco usabile più economica che uccide ORA (danno imparato ≥ HP nemico)
@@ -1403,14 +1403,19 @@ function pvpPick(state) {
   if (lethal) { S.pvp.note = 'lethal'; return { id: lethal.id, tk: enemy.key }; }
   const ragnarok = skills.find(k => String(k.id) === 'adv:8' || /ragnarok/i.test(k.name));
   const atFull = rage >= max;
-  // 2) sopravvivenza: a Rage piena con HP basso usa una skill DIFENSIVA potenziata
-  //    (Ironclad@100 → +DEF 2 turni) per reggere i colpi invece di nukeare.
-  if (atFull && S.pvp.survive && myHpPct <= (S.pvp.surviveAtPct || 25)) {
+  // 2) PREVEDI il nuke avversario: l'ultimate nemico parte quando la SUA risorsa è piena.
+  //    Se sta per nukeare e io sono a Rage piena, brace con una skill DIFENSIVA potenziata
+  //    (Ironclad@piena → +DEF 2 turni) per attutire il colpo in arrivo.
+  //    NB: il Berserker a HP bassi fa PIÙ danno e ruba PIÙ vita → NON ci si difende per
+  //    poca vita, si difende solo per anticipare il nuke nemico.
+  const eMax = enemy.advanced_resource_max || 0;
+  const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax;
+  if (atFull && S.pvp.survive && enemyNukeReady && !(dmgOf(ragnarok || {}) >= ehp)) {
     const def = skills.find(k => /ironclad|aura|guard/i.test(k.name) && rage >= pvpRageCost(k, max));
-    if (def) { S.pvp.note = 'survive(def@full)'; return { id: def.id, tk: enemy.key }; }
+    if (def) { S.pvp.note = 'brace(enemy nuke)'; return { id: def.id, tk: enemy.key }; }
   }
-  // 3) Rage piena → Ragnarok (massimo danno e miglior danno/Rage). Il burst è anche il modo
-  //    di battere i curatori (Saint/Inquisitor/Paladin): le loro cure non tengono il passo.
+  // 3) Rage piena → Ragnarok (massimo danno e miglior danno/Rage; a HP bassi colpisce ancora
+  //    più forte e cura di più). Il burst batte anche i curatori (le cure non tengono il passo).
   if (atFull && ragnarok) { S.pvp.note = 'ragnarok@full'; return { id: ragnarok.id, tk: enemy.key }; }
   // 4) altrimenti carica Rage con Slash (gratis, +25, alza anche il moltiplicatore Rage Engine)
   S.pvp.note = 'build';
@@ -1445,9 +1450,9 @@ async function pvpLoop() {
       }
       if (!S.pvp.cur) {
         const mm = await pvpPostJson('pvp_matchmake.php', { ladder: 'solo' });
-        if (mm.status !== 'success') { S.pvp.note = mm.message || 'niente token'; pvpTabRefresh(); await sleep(20000); continue; }
+        if (mm.status !== 'success') { S.pvp.note = mm.message || 'no tokens'; pvpTabRefresh(); await sleep(20000); continue; }
         if (mm.token_free_chance != null) S.pvp.freeChance = mm.token_free_chance;
-        if (mm.token_free_proc) S.pvp.note = '🎟 token GRATIS (proc)!';
+        if (mm.token_free_proc) S.pvp.note = '🎟 FREE token (proc)!';
         S.pvp.cur = String(mm.match_id); S.pvp.tokensUsed++; pvpRefreshTokens(true); save(); await sleep(400); continue;
       }
       const s = await pvpState(S.pvp.cur);
@@ -1503,7 +1508,7 @@ function renderPvp() {
   const p = S.pvp;
   const total = p.wins + p.losses;
   const wr = total ? Math.round(p.wins / total * 100) : 0;
-  const tokAge = p.tokensCheckedAt ? fmt(Date.now() - p.tokensCheckedAt) + ' fa' : 'mai';
+  const tokAge = p.tokensCheckedAt ? fmt(Date.now() - p.tokensCheckedAt) + ' ago' : 'never';
   // per-class breakdown (matches + losses learned)
   const rows = Object.values(p.db.classes || {}).sort((a, b) => (b.matches || 0) - (a.matches || 0)).map(c => {
     const m = c.matches || 0, l = c.losses || 0, w = m - l;
@@ -1518,41 +1523,41 @@ function renderPvp() {
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <button data-pvp-action="toggle" style="flex:1;border:none;border-radius:6px;padding:7px 0;cursor:pointer;
         font-size:13px;font-weight:bold;color:#fff;background:${p.enabled ? '#1f8a4c' : '#7a2540'}">
-        ${p.enabled ? '⏸ AutoPvP ON — tocca per FERMARE' : '▶ AutoPvP OFF — tocca per AVVIARE'}</button>
+        ${p.enabled ? '⏸ AutoPvP ON — tap to STOP' : '▶ AutoPvP OFF — tap to START'}</button>
     </div>
     <div style="color:${p.enabled ? '#7df' : '#888'};font-size:11px;margin-bottom:7px">
-      ${p.enabled ? '▶ gioca solo automatico (matchmake + max danno)' : '⏸ manuale — gioca tu a mano'}
+      ${p.enabled ? '▶ auto-playing (matchmake + max damage)' : '⏸ manual — play by hand'}
       ${p.note ? `· <span style="color:#fa8">${esc(p.note)}</span>` : ''}</div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:8px">
-      <div>🎟 token disp.: <b style="color:${(p.tokensAvail|0) > 0 ? '#0cf' : '#f66'}">${p.tokensAvail != null ? p.tokensAvail : '?'}</b></div>
-      <div>🍀 chance free: <b>${p.freeChance != null ? Math.round(p.freeChance * 100) + '%' : '?'}</b></div>
-      <div>♻ refill: <b>${(p.refillCost || 500).toLocaleString()} gem</b></div>
-      <div style="color:#667;font-size:10px">letto ${tokAge}</div>
+      <div>🎟 tokens left: <b style="color:${(p.tokensAvail|0) > 0 ? '#0cf' : '#f66'}">${p.tokensAvail != null ? p.tokensAvail : '?'}</b></div>
+      <div>🍀 free chance: <b>${p.freeChance != null ? Math.round(p.freeChance * 100) + '%' : '?'}</b></div>
+      <div>♻ refill: <b>${(p.refillCost || 500).toLocaleString()} gems</b></div>
+      <div style="color:#667;font-size:10px">read ${tokAge}</div>
     </div>
-    <div style="color:#667;font-size:10px;margin:-4px 0 8px">nessuna ricarica a timer: i token tornano col refill a gem o con la chance "free" a inizio match</div>
+    <div style="color:#667;font-size:10px;margin:-4px 0 8px">no timed recharge: tokens come back via gem refill or the "free" chance at match start</div>
 
     <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px">
-      <div>✅ vinti: <b style="color:#2f8">${p.wins}</b></div>
-      <div>❌ persi: <b style="color:#f88">${p.losses}</b></div>
+      <div>✅ wins: <b style="color:#2f8">${p.wins}</b></div>
+      <div>❌ losses: <b style="color:#f88">${p.losses}</b></div>
       <div>🏆 winrate: <b>${wr}%</b></div>
-      <div>🎟 spesi (sess.): <b>${p.tokensUsed}</b></div>
+      <div>🎟 spent (session): <b>${p.tokensUsed}</b></div>
     </div>
-    <div style="font-size:11px;color:#9ab;margin-bottom:6px">ultimi: ${recent || '—'}</div>
-    <div style="font-size:11px;margin-bottom:3px">🆚 ora: <b>${esc(p.lastClass || '—')}</b> · 🎯 <b>${esc(p.lastPick || '—')}</b></div>
+    <div style="font-size:11px;color:#9ab;margin-bottom:6px">recent: ${recent || '—'}</div>
+    <div style="font-size:11px;margin-bottom:3px">🆚 now: <b>${esc(p.lastClass || '—')}</b> · 🎯 <b>${esc(p.lastPick || '—')}</b></div>
 
     <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
-    <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classi imparate (${Object.keys(p.db.classes||{}).length})
-      <span style="color:#667;font-weight:normal;font-size:10px">· W/L · skill · effetti</span></div>
-    ${rows || '<div style="color:#667;font-size:11px">nessuna ancora — avvia o gioca un match</div>'}
+    <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classes learned (${Object.keys(p.db.classes||{}).length})
+      <span style="color:#667;font-weight:normal;font-size:10px">· W/L · skills · effects</span></div>
+    ${rows || '<div style="color:#667;font-size:11px">none yet — start it or play a match</div>'}
 
     <div style="display:flex;gap:6px;margin-top:9px">
-      <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 aggiorna token</button>
-      <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ esporta DB</button>
+      <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 refresh tokens</button>
+      <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ export DB</button>
     </div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px;color:#9ab;cursor:pointer">
-      <input type="checkbox" data-pvp-action="survive" ${p.survive ? 'checked' : ''}> sopravvivenza: a Rage piena e HP&lt;${p.surviveAtPct}% usa difesa invece del nuke
+      <input type="checkbox" data-pvp-action="survive" ${p.survive ? 'checked' : ''}> brace for enemy nuke: when the opponent's resource is full, pop defense (Ironclad +DEF) at full Rage instead of nuking
     </label>`;
 }
 
@@ -1566,7 +1571,7 @@ async function mainLoop() {
     // paused instead of silently resuming.
     if (paused) { status = '⏸ paused — manual play'; await sleep(600); renderUI(); continue; }
     // AutoPvP ON → il farm cede il controllo al modulo PvP (evita conflitti di fetch).
-    if (S.pvp.enabled) { status = '⚔ AutoPvP attivo — farm in pausa'; await sleep(2000); renderUI(); continue; }
+    if (S.pvp.enabled) { status = '⚔ AutoPvP active — farm paused'; await sleep(2000); renderUI(); continue; }
     if (!invLoaded) { await refreshInv(); invLoaded = true; }
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
@@ -2264,7 +2269,7 @@ function buildUI() {
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">📋 Log</button>
       <button id="vfb-tab-g" style="background:#252540;color:#aaa;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚙ Setup</button>
-      <button id="vfb-tab-pvp" title="Auto-PvP: ON/OFF + statistiche match + token"
+      <button id="vfb-tab-pvp" title="Auto-PvP: ON/OFF + match stats + tokens"
         style="background:#252540;color:#aaa;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚔PvP</button>
       <button id="vfb-r" title="reset stats (boss/heals/uptime — keeps farm kills)"
@@ -2443,7 +2448,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.28.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.29.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
