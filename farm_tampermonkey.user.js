@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.32.0
+// @version      1.33.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1348,22 +1348,39 @@ const pvpRageCost = (k, max) => k.requires_full_resource ? (max || 100)
   : (k.resource_cost != null ? k.resource_cost : (k.cost || 0));
 
 const _pvpSeen = {};   // mid:logId → 1 (dedup tra i poll)
+// statistiche del match CORRENTE (per diagnosticare PERCHÉ vinci/perdi). Si azzerano a ogni
+// nuovo match (mid diverso). myDmg = danno che faccio, enemyDmg = danno che subisco,
+// enemyHeal = quanto si cura il nemico, enemyBig = il suo colpo più forte su di me.
+let _pvpMatchStats = { mid: null, myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0 };
+// classifica una classe dai dati IMPARATI: curatore (si cura tanto / ha skill di cura) e/o
+// nuker (colpo singolo molto forte). Guida la strategia in pvpPick.
+function pvpProfile(cls) {
+  const C = (S.pvp.db.classes || {})[cls];
+  if (!C) return { healer: false, bursty: false, C: null };
+  const m = Math.max(1, C.matches || 1);
+  const hasHealSkill = Object.keys(C.skills || {}).some(n => /heal|recover|bless|sanct|mend/i.test(n));
+  const healer = hasHealSkill || (C.healed || 0) / m > 50000;     // cura > ~50k a match
+  const bursty = (C.bigHit?.dmg || 0) > 250000 || cls === 'Assassin'; // colpo singolo enorme
+  return { healer, bursty, C };
+}
 // impara da OGNI voce di log: danno delle mie skill (bucket per Rage, così becca la variante
 // POTENZIATA a Rage piena) + skill/effetti/retaliation/note di ogni classe avversaria.
 function pvpLearn(mid, state, logs, rageBefore) {
   const db = S.pvp.db;
   const enemyU = Object.values(state.teams?.enemy?.players_by_num || {})[0];
   const cls = enemyU?.advanced_class_name || 'Unknown';
+  if (_pvpMatchStats.mid !== mid) _pvpMatchStats = { mid, myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0 };
   for (const l of (logs || [])) {
     const key = mid + ':' + l.id; if (_pvpSeen[key]) continue; _pvpSeen[key] = 1;
     const d = l.details; if (!d || !d.skill) continue;
-    const dmg  = (d.target?.hp_before || 0) - (d.target?.hp_after || 0);
+    const dmg  = (d.target?.hp_before || 0) - (d.target?.hp_after || 0);  // >0 danno, <0 cura
     const self = (d.actor?.hp_before  || 0) - (d.actor?.hp_after  || 0);
     if (d.actor?.side === 'ally') {
       const name = d.skill.name;
       const m = db.my[name] = db.my[name] || { id: d.skill.id, cost: d.skill.cost, maxDmg: 0, byRage: {} };
       m.id = d.skill.id;
       if (dmg > m.maxDmg) m.maxDmg = dmg;
+      if (dmg > 0) _pvpMatchStats.myDmg += dmg;
       const bucket = (rageBefore != null && rageBefore >= 100) ? 'full' : 'partial';
       const b = m.byRage[bucket] = m.byRage[bucket] || { maxDmg: 0, note: '' };
       if (dmg > b.maxDmg) b.maxDmg = dmg;
@@ -1371,12 +1388,22 @@ function pvpLearn(mid, state, logs, rageBefore) {
       const eff = bucket === 'full' && (l.content || '').match(/((?:gains?|grants?|\+\d+%|defen\w*|shield|heal\w*|poison|stun)[^.]*?for \d+ (?:full )?turns?|\+\d+%[^.]*)/i);
       if (eff) b.note = eff[0].slice(0, 90);
     } else {
-      const C = db.classes[cls] = db.classes[cls] || { class: cls, resource: enemyU?.advanced_resource_name, skills: {}, effects: {}, notes: {}, matches: 0, losses: 0 };
+      const C = db.classes[cls] = db.classes[cls] || { class: cls, resource: enemyU?.advanced_resource_name, skills: {}, effects: {}, notes: {}, matches: 0, losses: 0, dmgToMe: 0, healed: 0, bigHit: { dmg: 0, skill: '' } };
       const sk = C.skills[d.skill.name] = C.skills[d.skill.name] || { id: d.skill.id, cost: d.skill.cost, maxDmg: 0, retaliationToMe: 0 };
       if (dmg  > sk.maxDmg)          sk.maxDmg = dmg;
       if (self > sk.retaliationToMe) sk.retaliationToMe = self;
       if (d.formula?.attack_notes)  C.notes.attack  = d.formula.attack_notes;
       if (d.formula?.defense_notes) C.notes.defense = d.formula.defense_notes;
+      // PATTERN per classe: quanto mi colpisce / quanto si cura / colpo più forte
+      if (dmg > 0) {                                   // mi ha fatto danno
+        _pvpMatchStats.enemyDmg += dmg;
+        if (dmg > _pvpMatchStats.enemyBig) _pvpMatchStats.enemyBig = dmg;
+        C.dmgToMe = (C.dmgToMe || 0) + dmg;
+        if (dmg > (C.bigHit?.dmg || 0)) C.bigHit = { dmg, skill: d.skill.name };
+      } else if (dmg < 0) {                            // si è curato
+        _pvpMatchStats.enemyHeal += -dmg;
+        C.healed = (C.healed || 0) + (-dmg);
+      }
     }
   }
   if (enemyU) {
@@ -1395,6 +1422,8 @@ function pvpPick(state) {
   const enemy = Object.values(state.teams?.enemy?.players_by_num || {}).find(u => u.alive);
   if (!enemy) return null;
   const ehp = enemy.hp || 1e9;
+  const cls = enemy.advanced_class_name || 'Unknown';
+  const prof = pvpProfile(cls);   // {healer, bursty} imparato dai match precedenti
   const dmgOf = k => { const e = S.pvp.db.my[k.name]; return e ? e.maxDmg : 0; };
   const usable = skills.filter(k => rage >= pvpRageCost(k, max));
   // 1) letale: la skill d'attacco usabile più economica che uccide ORA (danno imparato ≥ HP nemico)
@@ -1414,13 +1443,17 @@ function pvpPick(state) {
   const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax;
   const myEffects = Object.values(state.teams?.ally?.players_by_num || {})[0]?.effects || [];
   const haveDef = myEffects.some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
-  if (S.pvp.survive && enemyNukeReady && !haveDef) {
+  // STRATEGIA PER CLASSE: contro un CURATORE puro (Saint/Inquisitor) NON sprecare turni in
+  // difesa — ogni turno non offensivo gli lascia recuperare con le cure: tieni la pressione e
+  // brucia attraverso le cure. Brace solo contro classi NUKER (Assassin & co.) o classi ignote.
+  const braceWorthIt = prof.bursty || !prof.C;        // nuker, o classe mai vista (prudenza)
+  if (S.pvp.survive && enemyNukeReady && !haveDef && braceWorthIt) {
     const def = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /aura|guard/i.test(k.name));
-    if (def) { S.pvp.note = 'brace(enemy nuke)'; return { id: def.id, tk: enemy.key }; }
+    if (def) { S.pvp.note = 'brace(' + (prof.bursty ? cls + ' nuke' : 'nuke') + ')'; return { id: def.id, tk: enemy.key }; }
   }
   // 3) Rage piena → Ragnarok (massimo danno e miglior danno/Rage; a HP bassi colpisce ancora
-  //    più forte e cura di più). Il burst batte anche i curatori (le cure non tengono il passo).
-  if (atFull && ragnarok) { S.pvp.note = 'ragnarok@full'; return { id: ragnarok.id, tk: enemy.key }; }
+  //    più forte e cura di più). Il burst batte i curatori: le loro cure non tengono il passo.
+  if (atFull && ragnarok) { S.pvp.note = prof.healer ? 'ragnarok@full (vs healer: burst)' : 'ragnarok@full'; return { id: ragnarok.id, tk: enemy.key }; }
   // 4) altrimenti carica Rage con Slash (gratis, +25, alza anche il moltiplicatore Rage Engine)
   S.pvp.note = 'build';
   const slash = skills.find(k => String(k.id) === '0') || skills[skills.length - 1];
@@ -1431,13 +1464,26 @@ function pvpEndMatch(state) {
   const enemyU = Object.values(state.teams?.enemy?.players_by_num || {})[0];
   const cls = enemyU?.advanced_class_name || 'Unknown';
   const win = state.match?.winner_side === 'ally';
-  S.pvp.matches.push({ mid: S.pvp.cur, enemyClass: cls, winner: state.match?.winner_side });
+  // DIAGNOSI: perché ho vinto/perso, dalle statistiche del match (mydmg vs danno subito vs cure).
+  const st = (_pvpMatchStats.mid === S.pvp.cur) ? _pvpMatchStats : { myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0 };
+  let reason;
+  if (win) reason = 'won';
+  else if (st.enemyHeal > st.myDmg * 0.45) reason = 'out-healed';      // si è curato troppo
+  else if (st.enemyBig > st.myDmg * 0.5)   reason = 'their nuke';      // un colpo enorme
+  else if (st.enemyDmg > st.myDmg)         reason = 'out-damaged';     // più DPS di me
+  else reason = 'close';
+  S.pvp.matches.push({ mid: S.pvp.cur, enemyClass: cls, winner: state.match?.winner_side, reason,
+    myDmg: st.myDmg, enemyDmg: st.enemyDmg, enemyHeal: st.enemyHeal });
   if (S.pvp.matches.length > 200) S.pvp.matches.shift();
   if (win) S.pvp.wins++; else S.pvp.losses++;
   const C = S.pvp.db.classes[cls];
-  if (C) { C.matches = (C.matches || 0) + 1; if (!win) C.losses = (C.losses || 0) + 1; }
+  if (C) {
+    C.matches = (C.matches || 0) + 1;
+    if (!win) { C.losses = (C.losses || 0) + 1; C.lastLoss = reason; C.lossReasons = C.lossReasons || {}; C.lossReasons[reason] = (C.lossReasons[reason] || 0) + 1; }
+  }
   S.pvp.cur = null; _pvpUrlConsumed = true; save();
-  log(`⚔ PvP ${win ? 'WIN' : 'loss'} vs ${cls} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
+  const prof = pvpProfile(cls);
+  log(`⚔ PvP ${win ? 'WIN' : 'LOSS'} vs ${cls}${prof.healer ? ' (healer)' : ''}${prof.bursty ? ' (nuker)' : ''} · ${reason} · myDmg ${fmtDmg(st.myDmg)} / theirHeal ${fmtDmg(st.enemyHeal)} / theirBig ${fmtDmg(st.enemyBig)} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
 }
 
 async function pvpLoop() {
@@ -1522,13 +1568,17 @@ function renderPvp() {
   // per-class breakdown (matches + losses learned)
   const rows = Object.values(p.db.classes || {}).sort((a, b) => (b.matches || 0) - (a.matches || 0)).map(c => {
     const m = c.matches || 0, l = c.losses || 0, w = m - l;
+    const prof = pvpProfile(c.class);
+    const tag = (prof.healer ? '💚' : '') + (prof.bursty ? '💥' : '');
     const nSk = Object.keys(c.skills || {}).length, nEf = Object.keys(c.effects || {}).length;
-    return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-      <span style="color:#cda">${esc(c.class || '?')}</span>
-      <span style="color:#778">${w}/${l} · ${nSk}sk ${nEf}fx</span></div>`;
+    return `<div style="font-size:11px;padding:1px 0">
+      <div style="display:flex;justify-content:space-between">
+        <span style="color:#cda">${esc(c.class || '?')} ${tag}</span>
+        <span style="color:#778">${w}/${l} · ${nSk}sk ${nEf}fx</span></div>
+      ${c.lastLoss ? `<div style="color:#a88;font-size:10px;padding-left:8px">↳ last loss: ${esc(c.lastLoss)}</div>` : ''}</div>`;
   }).join('');
   const recent = (p.matches || []).slice(-6).reverse().map(m =>
-    `<span style="color:${m.winner === 'ally' ? '#2f8' : '#f88'}">${m.winner === 'ally' ? 'W' : 'L'}</span>`).join(' ');
+    `<span title="${esc((m.enemyClass || '') + (m.reason ? ' · ' + m.reason : ''))}" style="color:${m.winner === 'ally' ? '#2f8' : '#f88'};cursor:help">${m.winner === 'ally' ? 'W' : 'L'}</span>`).join(' ');
   return `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <button data-pvp-action="toggle" style="flex:1;border:none;border-radius:6px;padding:7px 0;cursor:pointer;
@@ -1559,7 +1609,7 @@ function renderPvp() {
 
     <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
     <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classes learned (${Object.keys(p.db.classes||{}).length})
-      <span style="color:#667;font-weight:normal;font-size:10px">· W/L · skills · effects</span></div>
+      <span style="color:#667;font-weight:normal;font-size:10px">· 💚 healer 💥 nuker · W/L · skills · effects</span></div>
     ${rows || '<div style="color:#667;font-size:11px">none yet — start it or play a match</div>'}
 
     <div style="display:flex;gap:6px;margin-top:9px">
@@ -2459,7 +2509,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.32.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.33.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
