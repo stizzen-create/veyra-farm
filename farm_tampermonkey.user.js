@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.30.0
+// @version      1.32.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1466,6 +1466,12 @@ async function pvpLoop() {
       S.pvp.lastClass = enemyU?.advanced_class_name || '';
       pvpLearn(S.pvp.cur, s, s.new_logs);
       if (s.match.ended) { pvpEndMatch(s); pvpRefreshTokens(true); pvpTabRefresh(); continue; }
+      // FAST mode: il turno nemico passa da lento a ~1s → match molto più rapidi (il bottone
+      // "enemy 1s" della pagina). Default del match è 'normal' → lo forziamo a 'fast_enemy'.
+      if (s.match.solo_control_mode && s.match.solo_control_mode !== 'fast_enemy') {
+        await pvpPostJson('pvp_battle_action.php', { match_id: S.pvp.cur, since_log_id: s.last_log_id, action: 'set_solo_control_mode', control_mode: 'fast_enemy' });
+        continue;   // rileggi lo stato aggiornato al prossimo giro
+      }
       if (s.turn?.side === 'ally') {              // solo: l'unico alleato sono io → mio turno
         const rageBefore = s.me?.advanced_resource || 0;
         const p = pvpPick(s); if (!p) { await sleep(500); continue; }
@@ -1574,8 +1580,9 @@ async function mainLoop() {
     // state is persisted (S.paused), so a page reload (e.g. after a potion) stays
     // paused instead of silently resuming.
     if (paused) { status = '⏸ paused — manual play'; await sleep(600); renderUI(); continue; }
-    // AutoPvP ON → il farm cede il controllo al modulo PvP (evita conflitti di fetch).
-    if (S.pvp.enabled) { status = '⚔ AutoPvP active — farm paused'; await sleep(2000); renderUI(); continue; }
+    // Farm e AutoPvP sono indipendenti (stamina vs token/Rage): girano in PARALLELO. L'unica
+    // cosa condivisa è la banda di richieste — entrambi i loop gestiscono già il rate-limit
+    // ("Slow down" → retry), quindi non serve mettere in pausa il farm durante il PvP.
     if (!invLoaded) { await refreshInv(); invLoaded = true; }
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
@@ -2452,7 +2459,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.30.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.32.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
