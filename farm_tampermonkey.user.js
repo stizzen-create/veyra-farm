@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.34.0
+// @version      1.35.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1461,11 +1461,10 @@ function pvpPick(state) {
     S.pvp.note = 'war aura → shred def → ragnarok next';
     return { id: warAura.id, tk: enemy.key };
   }
-  // 4) BUILD verso Rage piena. Ogni turno la Rage sale di +25 QUALUNQUE skill usi (visto nei
-  //    log: "gains 25 Rage"), quindi costruisco con WARRIOR AURA: ricarica come tutto il resto E
-  //    tiene aperto lo shred difesa nemica, così quando arrivo a 100 il Ragnarok colpisce già a
-  //    difesa abbassata. Slash solo se per qualche motivo non posso permettermi Warrior Aura.
-  if (warAura && rage >= pvpRageCost(warAura, max)) { S.pvp.note = 'build + shred (war aura)'; return { id: warAura.id, tk: enemy.key }; }
+  // 4) BUILD verso Rage piena con SLASH. La Rage sale ogni turno, ma Warrior Aura NON fa danno
+  //    (costa 6, solo lo shred) → buildare con lei = turni a zero danno, perdi la gara di DPS.
+  //    Slash invece fa danno E carica Rage. Warrior Aura si usa UNA volta a Rage piena (punto 3)
+  //    per aprire la difesa subito prima del Ragnarok, non come builder.
   S.pvp.note = 'build (slash)';
   const slash = skills.find(k => String(k.id) === '0') || skills[skills.length - 1];
   return { id: slash.id, tk: enemy.key };
@@ -2524,7 +2523,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.34.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.35.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
