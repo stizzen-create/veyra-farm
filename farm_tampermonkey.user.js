@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.29.0
+// @version      1.30.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1403,15 +1403,19 @@ function pvpPick(state) {
   if (lethal) { S.pvp.note = 'lethal'; return { id: lethal.id, tk: enemy.key }; }
   const ragnarok = skills.find(k => String(k.id) === 'adv:8' || /ragnarok/i.test(k.name));
   const atFull = rage >= max;
-  // 2) PREVEDI il nuke avversario: l'ultimate nemico parte quando la SUA risorsa è piena.
-  //    Se sta per nukeare e io sono a Rage piena, brace con una skill DIFENSIVA potenziata
-  //    (Ironclad@piena → +DEF 2 turni) per attutire il colpo in arrivo.
-  //    NB: il Berserker a HP bassi fa PIÙ danno e ruba PIÙ vita → NON ci si difende per
-  //    poca vita, si difende solo per anticipare il nuke nemico.
+  // 2) PREVEDI il nuke avversario: l'ultimate nemico parte quando la SUA risorsa è piena
+  //    (es. l'ASSASSIN ha un nuke fortissimo appena è a risorsa piena). Brace con Ironclad
+  //    (+DEF) PRIMA che il colpo arrivi — NON serve che io sia a Rage piena: anche l'Ironclad
+  //    base alza la difesa (a Rage piena è la versione potenziata, +DEF e 2 turni). Non lo
+  //    ri-casto se ho già un buff difensivo attivo (non sprecare turni).
+  //    NB: il Berserker a HP bassi fa PIÙ danno e ruba PIÙ vita → NON ci si difende per poca
+  //    vita, ci si difende SOLO per anticipare il nuke nemico.
   const eMax = enemy.advanced_resource_max || 0;
   const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax;
-  if (atFull && S.pvp.survive && enemyNukeReady && !(dmgOf(ragnarok || {}) >= ehp)) {
-    const def = skills.find(k => /ironclad|aura|guard/i.test(k.name) && rage >= pvpRageCost(k, max));
+  const myEffects = Object.values(state.teams?.ally?.players_by_num || {})[0]?.effects || [];
+  const haveDef = myEffects.some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
+  if (S.pvp.survive && enemyNukeReady && !haveDef) {
+    const def = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /aura|guard/i.test(k.name));
     if (def) { S.pvp.note = 'brace(enemy nuke)'; return { id: def.id, tk: enemy.key }; }
   }
   // 3) Rage piena → Ragnarok (massimo danno e miglior danno/Rage; a HP bassi colpisce ancora
@@ -1532,10 +1536,10 @@ function renderPvp() {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:8px">
       <div>🎟 tokens left: <b style="color:${(p.tokensAvail|0) > 0 ? '#0cf' : '#f66'}">${p.tokensAvail != null ? p.tokensAvail : '?'}</b></div>
       <div>🍀 free chance: <b>${p.freeChance != null ? Math.round(p.freeChance * 100) + '%' : '?'}</b></div>
-      <div>♻ refill: <b>${(p.refillCost || 500).toLocaleString()} gems</b></div>
+      <div>♻ refill: <b>${(p.refillCost || 500).toLocaleString()} gems</b> <span style="color:#777">(manual)</span></div>
       <div style="color:#667;font-size:10px">read ${tokAge}</div>
     </div>
-    <div style="color:#667;font-size:10px;margin:-4px 0 8px">no timed recharge: tokens come back via gem refill or the "free" chance at match start</div>
+    <div style="color:#667;font-size:10px;margin:-4px 0 8px">the bot NEVER spends gems — when tokens run out it just idles. They come back only via the "free" chance at match start (or your own manual refill).</div>
 
     <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px">
@@ -1557,7 +1561,7 @@ function renderPvp() {
       <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ export DB</button>
     </div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px;color:#9ab;cursor:pointer">
-      <input type="checkbox" data-pvp-action="survive" ${p.survive ? 'checked' : ''}> brace for enemy nuke: when the opponent's resource is full, pop defense (Ironclad +DEF) at full Rage instead of nuking
+      <input type="checkbox" data-pvp-action="survive" ${p.survive ? 'checked' : ''}> brace for enemy nuke: when the opponent's resource is full (e.g. Assassin's burst), use Ironclad (+DEF) first to soften the incoming hit
     </label>`;
 }
 
@@ -2448,7 +2452,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.29.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.30.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
