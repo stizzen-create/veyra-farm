@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.26.0
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle
+// @version      1.27.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn at MAX damage (build Rage→Ragnarok at full, lethal check, survival), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -156,6 +156,21 @@ const defState = () => ({
   questEnabled: true,
   questTaken: 0, questDone: 0,   // contatori accettate / consegnate
   questActive: null,             // {id,title,monster,minDmg,have,need} cache per UI + farm
+  // ── AUTO-PvP (solo ladder) ────────────────────────────────────────────────────
+  // Modulo PvP: si attiva SOLO sulle pagine /pvp.php e /pvp_battle.php. Quando enabled
+  // matchmaka da solo (finché ci sono token), gioca ogni turno scegliendo la skill a
+  // danno massimo, e IMPARA da ogni match riempiendo pvp.db (per classe avversaria +
+  // le mie skill, incl. l'effetto POTENZIATO a Rage piena). enabled=false → giochi a mano.
+  pvp: {
+    enabled: false,             // toggle ON/OFF (così puoi giocare a mano)
+    survive: true,              // a Rage piena, se HP basso usa una skill difensiva potenziata invece del nuke
+    surviveAtPct: 25,           // soglia HP% sotto cui preferire la difesa
+    cur: null,                  // match_id in corso (guida il loop)
+    tokensUsed: 0, wins: 0, losses: 0,
+    lastPick: '', lastClass: '', note: '',
+    matches: [],                // {mid, enemyClass, winner}
+    db: { classes: {}, my: {} },// il DB che cresce a ogni match
+  },
 });
 let S = (() => {
   try { return JSON.parse(GM_getValue(SK, 'null')) || defState(); }
@@ -1293,6 +1308,220 @@ async function processQuests() {
 // Pass 1: timed bosses across ALL waves (high priority, with LSP).
 // Pass 2: farm mobs across ALL waves (use remaining stamina).
 // fetchWave has a 30s cache so each wave is only fetched once per cycle.
+// ── AUTO-PvP MODULE ─────────────────────────────────────────────────────────────
+// Solo 1v1, a turni (~10s/turno). Pilota il match con la stessa API della pagina:
+//   pvp_battle_state.php (GET stato) · pvp_battle_action.php (POST use_skill) · pvp_matchmake.php
+// Risorsa = Rage (Berserker). Passivo "Rage Engine": il danno cresce con la Rage attuale.
+// Ragnarok Cleave (adv:8) richiede Rage PIENA (requires_full_resource) — il nuke grosso.
+// Le skill lanciate a Rage PIENA hanno effetto POTENZIATO (es. Ironclad → +DEF, 2 turni):
+// le IMPARIAMO dal log per skill/livello-di-rage, così la strategia si adatta a ogni match.
+const PVP_PAGE = /\/pvp(_battle)?\.php$/.test(location.pathname);
+let _pvpUrlConsumed = false, _pvpStale = 0, _pvpLastSave = 0;
+
+const pvpReqHeaders = extra => Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, extra || {});
+async function pvpState(mid) {
+  try {
+    const r = await fetchT(`${BASE}/pvp_battle_state.php?match_id=${mid}&since_log_id=0`, { headers: pvpReqHeaders() }, 12000);
+    return await r.json();
+  } catch { return {}; }
+}
+async function pvpPostJson(path, body) {
+  try {
+    const r = await fetchT(`${BASE}/${path}`, {
+      method:  'POST',
+      headers: pvpReqHeaders({ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }),
+      body:    new URLSearchParams(body).toString(),
+    }, 12000);
+    const t = await r.text();
+    try { return JSON.parse(t); } catch { return {}; }
+  } catch { return {}; }
+}
+const pvpAction = (mid, since, skillId, targetKey) =>
+  pvpPostJson('pvp_battle_action.php', { match_id: mid, since_log_id: since, action: 'use_skill', skill_id: skillId, target_key: targetKey });
+
+// costo Rage EFFETTIVO: le skill avanzate richiedono la risorsa PIENA (il campo `cost`
+// è fuorviante — contano `requires_full_resource` + `resource_cost`).
+const pvpRageCost = (k, max) => k.requires_full_resource ? (max || 100)
+  : (k.resource_cost != null ? k.resource_cost : (k.cost || 0));
+
+const _pvpSeen = {};   // mid:logId → 1 (dedup tra i poll)
+// impara da OGNI voce di log: danno delle mie skill (bucket per Rage, così becca la variante
+// POTENZIATA a Rage piena) + skill/effetti/retaliation/note di ogni classe avversaria.
+function pvpLearn(mid, state, logs, rageBefore) {
+  const db = S.pvp.db;
+  const enemyU = Object.values(state.teams?.enemy?.players_by_num || {})[0];
+  const cls = enemyU?.advanced_class_name || 'Unknown';
+  for (const l of (logs || [])) {
+    const key = mid + ':' + l.id; if (_pvpSeen[key]) continue; _pvpSeen[key] = 1;
+    const d = l.details; if (!d || !d.skill) continue;
+    const dmg  = (d.target?.hp_before || 0) - (d.target?.hp_after || 0);
+    const self = (d.actor?.hp_before  || 0) - (d.actor?.hp_after  || 0);
+    if (d.actor?.side === 'ally') {
+      const name = d.skill.name;
+      const m = db.my[name] = db.my[name] || { id: d.skill.id, cost: d.skill.cost, maxDmg: 0, byRage: {} };
+      m.id = d.skill.id;
+      if (dmg > m.maxDmg) m.maxDmg = dmg;
+      const bucket = (rageBefore != null && rageBefore >= 100) ? 'full' : 'partial';
+      const b = m.byRage[bucket] = m.byRage[bucket] || { maxDmg: 0, note: '' };
+      if (dmg > b.maxDmg) b.maxDmg = dmg;
+      // a Rage piena cattura il testo dell'effetto potenziato (dal contenuto del log)
+      const eff = bucket === 'full' && (l.content || '').match(/((?:gains?|grants?|\+\d+%|defen\w*|shield|heal\w*|poison|stun)[^.]*?for \d+ (?:full )?turns?|\+\d+%[^.]*)/i);
+      if (eff) b.note = eff[0].slice(0, 90);
+    } else {
+      const C = db.classes[cls] = db.classes[cls] || { class: cls, resource: enemyU?.advanced_resource_name, skills: {}, effects: {}, notes: {}, matches: 0, losses: 0 };
+      const sk = C.skills[d.skill.name] = C.skills[d.skill.name] || { id: d.skill.id, cost: d.skill.cost, maxDmg: 0, retaliationToMe: 0 };
+      if (dmg  > sk.maxDmg)          sk.maxDmg = dmg;
+      if (self > sk.retaliationToMe) sk.retaliationToMe = self;
+      if (d.formula?.attack_notes)  C.notes.attack  = d.formula.attack_notes;
+      if (d.formula?.defense_notes) C.notes.defense = d.formula.defense_notes;
+    }
+  }
+  if (enemyU) {
+    const C = db.classes[cls] = db.classes[cls] || { class: cls, resource: enemyU.advanced_resource_name, skills: {}, effects: {}, notes: {}, matches: 0, losses: 0 };
+    for (const e of (enemyU.effects || [])) { const n = e.name || e.label || e.id; if (n) C.effects[n] = e; }
+  }
+}
+
+// scelta adattiva della skill — "quale e quando". Usa il danno IMPARATO nel db, il nuke a
+// Rage piena, la consapevolezza della classe (curatori → burst) e una regola di sopravvivenza
+// (HP basso a Rage piena → skill difensiva potenziata invece del nuke).
+function pvpPick(state) {
+  const me = state.me || {};
+  const rage = me.advanced_resource || 0, max = me.advanced_resource_max || 100;
+  const skills = me.skills || [];
+  const enemy = Object.values(state.teams?.enemy?.players_by_num || {}).find(u => u.alive);
+  if (!enemy) return null;
+  const ehp = enemy.hp || 1e9;
+  const myUnit = Object.values(state.teams?.ally?.players_by_num || {})[0] || {};
+  const myHpPct = myUnit.hp_max ? (myUnit.hp / myUnit.hp_max * 100) : 100;
+  const dmgOf = k => { const e = S.pvp.db.my[k.name]; return e ? e.maxDmg : 0; };
+  const usable = skills.filter(k => rage >= pvpRageCost(k, max));
+  // 1) letale: la skill d'attacco usabile più economica che uccide ORA (danno imparato ≥ HP nemico)
+  const lethal = usable.filter(k => k.type === 'attack' && dmgOf(k) >= ehp)
+    .sort((a, b) => pvpRageCost(a, max) - pvpRageCost(b, max))[0];
+  if (lethal) { S.pvp.note = 'lethal'; return { id: lethal.id, tk: enemy.key }; }
+  const ragnarok = skills.find(k => String(k.id) === 'adv:8' || /ragnarok/i.test(k.name));
+  const atFull = rage >= max;
+  // 2) sopravvivenza: a Rage piena con HP basso usa una skill DIFENSIVA potenziata
+  //    (Ironclad@100 → +DEF 2 turni) per reggere i colpi invece di nukeare.
+  if (atFull && S.pvp.survive && myHpPct <= (S.pvp.surviveAtPct || 25)) {
+    const def = skills.find(k => /ironclad|aura|guard/i.test(k.name) && rage >= pvpRageCost(k, max));
+    if (def) { S.pvp.note = 'survive(def@full)'; return { id: def.id, tk: enemy.key }; }
+  }
+  // 3) Rage piena → Ragnarok (massimo danno e miglior danno/Rage). Il burst è anche il modo
+  //    di battere i curatori (Saint/Inquisitor/Paladin): le loro cure non tengono il passo.
+  if (atFull && ragnarok) { S.pvp.note = 'ragnarok@full'; return { id: ragnarok.id, tk: enemy.key }; }
+  // 4) altrimenti carica Rage con Slash (gratis, +25, alza anche il moltiplicatore Rage Engine)
+  S.pvp.note = 'build';
+  const slash = skills.find(k => String(k.id) === '0') || skills[skills.length - 1];
+  return { id: slash.id, tk: enemy.key };
+}
+
+function pvpEndMatch(state) {
+  const enemyU = Object.values(state.teams?.enemy?.players_by_num || {})[0];
+  const cls = enemyU?.advanced_class_name || 'Unknown';
+  const win = state.match?.winner_side === 'ally';
+  S.pvp.matches.push({ mid: S.pvp.cur, enemyClass: cls, winner: state.match?.winner_side });
+  if (S.pvp.matches.length > 200) S.pvp.matches.shift();
+  if (win) S.pvp.wins++; else S.pvp.losses++;
+  const C = S.pvp.db.classes[cls];
+  if (C) { C.matches = (C.matches || 0) + 1; if (!win) C.losses = (C.losses || 0) + 1; }
+  S.pvp.cur = null; _pvpUrlConsumed = true; save();
+  log(`⚔ PvP ${win ? 'WIN' : 'loss'} vs ${cls} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
+}
+
+async function pvpLoop() {
+  while (running) {
+    if (!S.pvp.enabled || paused) { await sleep(800); continue; }
+    try {
+      // riprendi un match già aperto dalla URL della battle page (una sola volta), poi matchmake
+      if (!S.pvp.cur && !_pvpUrlConsumed) {
+        const m = location.pathname.includes('pvp_battle.php') && new URL(location.href).searchParams.get('match_id');
+        if (m) S.pvp.cur = m;
+        _pvpUrlConsumed = true;
+      }
+      if (!S.pvp.cur) {
+        const mm = await pvpPostJson('pvp_matchmake.php', { ladder: 'solo' });
+        if (mm.status !== 'success') { S.pvp.note = mm.message || 'niente token'; renderPvpPanel(); await sleep(20000); continue; }
+        S.pvp.cur = String(mm.match_id); S.pvp.tokensUsed++; save(); await sleep(400); continue;
+      }
+      const s = await pvpState(S.pvp.cur);
+      if (!s.match) { if (++_pvpStale > 3) { S.pvp.cur = null; _pvpStale = 0; } await sleep(700); continue; }
+      _pvpStale = 0;
+      const enemyU = Object.values(s.teams?.enemy?.players_by_num || {})[0];
+      S.pvp.lastClass = enemyU?.advanced_class_name || '';
+      pvpLearn(S.pvp.cur, s, s.new_logs);
+      if (s.match.ended) { pvpEndMatch(s); renderPvpPanel(); continue; }
+      if (s.turn?.side === 'ally') {              // solo: l'unico alleato sono io → mio turno
+        const rageBefore = s.me?.advanced_resource || 0;
+        const p = pvpPick(s); if (!p) { await sleep(500); continue; }
+        S.pvp.lastPick = p.id + (S.pvp.note ? ' · ' + S.pvp.note : '');
+        let d = await pvpAction(S.pvp.cur, s.last_log_id, p.id, p.tk);
+        if (!d || d.ok === false) {               // race "Not your turn"/reject → rileggi e ripiega su Slash
+          const s2 = await pvpState(S.pvp.cur);
+          if (s2.turn?.side === 'ally') d = await pvpAction(S.pvp.cur, s2.last_log_id, '0', p.tk);
+        }
+        if (d && d.new_logs) pvpLearn(S.pvp.cur, d, d.new_logs, rageBefore);
+        if (d?.match?.ended) pvpEndMatch(d);
+        await sleep(220);
+      } else {
+        await sleep(700);
+      }
+      if (Date.now() - _pvpLastSave > 10000) { save(); _pvpLastSave = Date.now(); }  // persisti il DB imparato (throttle)
+    } catch (e) { S.pvp.note = 'err: ' + e.message; await sleep(600); }
+    renderPvpPanel();
+  }
+}
+
+// ── PvP PANEL (solo sulle pagine PvP) ────────────────────────────────────────────
+let pvpPanel = null, pvpBody = null;
+function buildPvpPanel() {
+  pvpPanel = document.createElement('div');
+  Object.assign(pvpPanel.style, {
+    position: 'fixed', top: '8px', right: '8px',
+    width: 'min(300px, calc(100vw - 16px))', boxSizing: 'border-box',
+    background: '#0d0d18', border: '1px solid #6a2a4c', borderRadius: '10px',
+    zIndex: '2147483647', fontFamily: 'monospace', fontSize: '12px',
+    boxShadow: '0 4px 28px #0009', color: '#ccc',
+  });
+  pvpPanel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#2a1626;border-radius:10px 10px 0 0">
+      <span style="color:#ff5c8a;font-weight:bold">⚔ AutoPvP <span style="color:#667;font-weight:normal;font-size:10px">by UANM</span></span>
+      <button id="pvp-toggle" style="border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:bold"></button>
+    </div>
+    <div id="pvp-body" style="padding:8px 10px"></div>`;
+  document.body.appendChild(pvpPanel);
+  pvpBody = pvpPanel.querySelector('#pvp-body');
+  pvpPanel.querySelector('#pvp-toggle').addEventListener('click', () => {
+    S.pvp.enabled = !S.pvp.enabled; S.pvp.note = S.pvp.enabled ? 'avvio…' : 'off'; save(); renderPvpPanel();
+    log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON' : 'OFF'}`, '#ff5c8a');
+  });
+  renderPvpPanel();
+}
+function renderPvpPanel() {
+  if (!pvpBody) return;
+  const p = S.pvp;
+  const btn = pvpPanel.querySelector('#pvp-toggle');
+  btn.textContent = p.enabled ? '⏸ ON' : '▶ OFF';
+  btn.style.background = p.enabled ? '#1f8a4c' : '#252540';
+  btn.style.color = '#fff';
+  const classes = Object.keys(p.db.classes || {});
+  pvpBody.innerHTML = `
+    <div style="margin-bottom:6px;color:${p.enabled ? '#7df' : '#888'}">${p.enabled ? '▶ gioco solo automatico' : '⏸ manuale (premi ON)'}</div>
+    <div>🎟 token usati: <b>${p.tokensUsed}</b> · ✅ <b style="color:#2f8">${p.wins}</b>W / <b style="color:#f88">${p.losses}</b>L</div>
+    <div>🆚 classe: <b>${p.lastClass || '—'}</b></div>
+    <div>🎯 mossa: <b>${p.lastPick || '—'}</b></div>
+    <div style="color:#9c6;margin-top:3px">📚 classi: ${classes.length} <span style="color:#667;font-size:10px">${classes.join(', ')}</span></div>
+    ${p.note ? `<div style="color:#fa8;font-size:11px;margin-top:2px">${p.note}</div>` : ''}
+    <button id="pvp-export" style="margin-top:7px;background:#252540;color:#ccc;border:none;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px">⬇ esporta DB (console+clipboard)</button>`;
+  const ex = pvpBody.querySelector('#pvp-export');
+  if (ex) ex.addEventListener('click', () => {
+    const j = JSON.stringify(S.pvp.db, null, 2);
+    console.log(j); try { navigator.clipboard.writeText(j); } catch {}
+    log('PvP DB → console + clipboard', '#9cf');
+  });
+}
+
 async function mainLoop() {
   readStamFromDOM();
   let invLoaded = false;
@@ -1302,6 +1531,8 @@ async function mainLoop() {
     // state is persisted (S.paused), so a page reload (e.g. after a potion) stays
     // paused instead of silently resuming.
     if (paused) { status = '⏸ paused — manual play'; await sleep(600); renderUI(); continue; }
+    // Sulle pagine PvP il farm non ha nulla da fare: lascia il controllo al modulo AutoPvP.
+    if (PVP_PAGE) { status = '⚔ pagina PvP — farm in pausa'; await sleep(2000); renderUI(); continue; }
     if (!invLoaded) { await refreshInv(); invLoaded = true; }
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
@@ -2149,7 +2380,7 @@ function init() {
   buildUI();
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.20.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.27.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
@@ -2163,6 +2394,13 @@ function init() {
     for (const t of (w.targets || [])) {
       log(`📋 ${w.id} · ${t.timer ? '⏰' : '🎯'} ${t.label} → stop@${fmtDmg(t.dmgTarget)}${t.killLimit != null ? ` ·${t.killLimit}k` : ''}${(t.include && t.include.length) ? ` inc[${t.include.join(',')}]` : ''}${(t.exclude && t.exclude.length) ? ` exc[${t.exclude.join(',')}]` : ''}`, '#cb8');
     }
+  }
+  // AUTO-PvP: solo sulle pagine /pvp.php e /pvp_battle.php → pannello dedicato + loop.
+  // enabled persiste; il farm resta in pausa qui (vedi guardia in mainLoop).
+  if (PVP_PAGE) {
+    buildPvpPanel();
+    log(`⚔ AutoPvP pronto · ${S.pvp.enabled ? 'ON (auto)' : 'OFF (premi ON)'} · classi imparate: ${Object.keys(S.pvp.db.classes || {}).length}`, '#ff5c8a');
+    pvpLoop().catch(e => console.error('[AutoPvP]', e));
   }
   mainLoop().catch(e => console.error('[FarmBot]', e));
 }
