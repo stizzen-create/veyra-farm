@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.44.0
+// @version      1.45.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1535,19 +1535,26 @@ function pvpPick(state, myTurns) {
     S.pvp.note = 'war aura (combo setup)'; return { id: warAuraSk.id, tk: enemy.key };
   }
 
-  // 4b) RACE FILLER — vs nemici veloci/bursty il riempitivo NON è Slash (45k) ma il miglior colpo
-  //     affordable (Power Slash ~455k): così vinci la gara di DPS invece di farti logorare. Tieni da
-  //     parte i 15 token del Ragnarok SOLO se la Rage è già vicina al pieno (al prossimo turno nuko).
-  if (race && powerHit && (dmgOf(powerHit) || 0) > (dmgOf(slash) || 0)) {
-    const reserve = (rage >= max - 25 && nukeSk) ? cost(nukeSk) : 0;
-    if (tokens - cost(powerHit) >= reserve) {
-      S.pvp.note = 'race ' + powerHit.name; return { id: powerHit.id, tk: enemy.key };
+  // 4b) FILLER (default — ex "race", ora per OGNI matchup): invece di Slash (45k) usa il miglior colpo
+  //     affordable, ma tieni SEMPRE da parte i 15 token del Ragnarok così la combo a Rage piena non
+  //     viene mai affamata (il Ragnarok ~967k vale ~2 Power Slash → non si sacrifica mai). Scelta
+  //     situazionale (idea di UANM): se il nemico sta per nukare (risorsa carica) e non ho difesa su →
+  //     Ironclad (≈198k + GRANTS +41% def 2 turni, costa 1 token meno di Power Slash: para E fa danno);
+  //     altrimenti Power Slash (≈455k, massimo DPS per vincere la gara di danno).
+  //     DIAGNOSI 2026-06-21 (export 68W/20L): nelle SCONFITTE il bot fa ~0.5–1.6M danno vs ~2–2.7M nelle
+  //     vittorie → perdeva (out-damaged/out-healed) perché slashava (45k) invece di Power-slashare (455k).
+  if (haveNuke && powerHit) {
+    const reserve = nukeSk ? cost(nukeSk) : 0;                                  // 15 token sempre riservati al Ragnarok
+    const threat  = (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer;
+    const filler  = (threat && ironclad) ? ironclad : powerHit;                 // sotto minaccia: Ironclad (danno+DEF, più economico)
+    if ((dmgOf(filler) || 0) > (dmgOf(slash) || 0) && tokens - cost(filler) >= reserve) {
+      S.pvp.note = (filler === ironclad ? 'def-filler ' : 'filler ') + filler.name;
+      return { id: filler.id, tk: enemy.key };
     }
   }
 
-  // 5) BUILD — Slash (gratis): carica Rage verso 100 E lascia rigenerare i token per la combo. È il
-  //    builder giusto in (quasi) ogni caso: NON spendere token su Ironclad/Power Slash come filler,
-  //    affamerebbe la combo (era il bug "usa sempre Ironclad e non arriva mai a Ragnarok").
+  // 5) BUILD — Slash (gratis): ora solo FALLBACK, quando non posso permettermi un filler vero senza
+  //    intaccare i 15 token riservati al Ragnarok. Carica Rage verso 100 e rigenera i token per la combo.
   if (slash && haveNuke) { S.pvp.note = 'build (slash→combo)'; return { id: slash.id, tk: enemy.key }; }
 
   // 6) FALLBACK (nessun nuke conosciuto/equipaggiato) → miglior colpo affordable, o Slash.
