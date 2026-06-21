@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.36.0
+// @version      1.41.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1320,6 +1320,7 @@ async function processQuests() {
 // le IMPARIAMO dal log per skill/livello-di-rage, così la strategia si adatta a ogni match.
 const PVP_PAGE = /\/pvp(_battle)?\.php$/.test(location.pathname);
 let _pvpUrlConsumed = false, _pvpStale = 0, _pvpLastSave = 0;
+let _pvpTurnMid = null, _pvpMyTurns = 0;   // conta i MIEI turni nel match corrente (per l'apertura Ironclad)
 
 const pvpReqHeaders = extra => Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, extra || {});
 async function pvpState(mid) {
@@ -1415,9 +1416,13 @@ function pvpLearn(mid, state, logs, rageBefore) {
 // scelta adattiva della skill — "quale e quando". Usa il danno IMPARATO nel db, il nuke a
 // Rage piena, la consapevolezza della classe (curatori → burst) e una regola di sopravvivenza
 // (HP basso a Rage piena → skill difensiva potenziata invece del nuke).
-function pvpPick(state) {
+function pvpPick(state, myTurns) {
   const me = state.me || {};
   const rage = me.advanced_resource || 0, max = me.advanced_resource_max || 100;
+  // TOKEN = pool del match (cap ~40, rigenera ogni turno). `skill.cost` è il costo in TOKEN
+  // (Slash 0, Ironclad/War Aura 6, Power Slash 9, Ragnarok 15). Slash GRATIS = builder che carica
+  // Rage E lascia rigenerare i token. La Rage (0-100, +25/turno) si AZZERA dopo 100 se non spesa.
+  const tokens = Number(me.tokens) || 0;
   const skills = me.skills || [];
   const enemy = Object.values(state.teams?.enemy?.players_by_num || {}).find(u => u.alive);
   if (!enemy) return null;
@@ -1425,77 +1430,83 @@ function pvpPick(state) {
   const cls = enemy.advanced_class_name || 'Unknown';
   const prof = pvpProfile(cls);   // {healer, bursty} imparato dai match precedenti
   const atFull = rage >= max;
-  // danno IMPARATO di una mia skill nel bucket di Rage che vale ADESSO: a Rage piena uso la
-  // variante potenziata (byRage.full, es. Ragnarok@full=1.2M), altrimenti la partial. Se non
-  // l'ho mai vista → null (vale "da provare per impararla").
+  const cost = k => k && k.cost || 0;
+  // danno IMPARATO di una mia skill nel bucket di Rage che vale ADESSO (full vs partial).
   const dmgOf = k => {
     const e = S.pvp.db.my[k && k.name]; if (!e) return null;
     const b = e.byRage || {};
     const v = atFull ? (b.full && b.full.maxDmg) : (b.partial && b.partial.maxDmg);
     return v || e.maxDmg || 0;
   };
-  // lanciabili ORA: skill d'attacco con Rage ≥ costo effettivo (le full-resource servono la barra piena)
-  const usable = skills.filter(k => k.type === 'attack' && rage >= pvpRageCost(k, max));
-
-  // 1) LETALE: la skill usabile più economica il cui danno imparato uccide ORA (≥ HP nemico)
-  const lethal = usable.filter(k => (dmgOf(k) || 0) >= ehp)
-    .sort((a, b) => pvpRageCost(a, max) - pvpRageCost(b, max))[0];
-  if (lethal) { S.pvp.note = 'lethal ' + lethal.name; return { id: lethal.id, tk: enemy.key }; }
+  // LANCIABILI ORA = abbastanza TOKEN per il costo, e le full-resource (Ragnarok) anche Rage piena.
+  const usable = skills.filter(k => k.type === 'attack' && tokens >= cost(k) && (!k.requires_full_resource || atFull));
+  const nukeSk    = skills.find(k => k.requires_full_resource);      // Ragnarok Cleave
+  const warAuraSk = skills.find(k => /warrior aura/i.test(k.name));
+  const comboCost = cost(warAuraSk) + cost(nukeSk) || 21;            // War Aura(6) + Ragnarok(15) = 21 token
+  const slash     = skills.find(k => String(k.id) === '0');         // builder gratuito
+  const ironclad  = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /guard/i.test(k.name));
 
   const enemyFx = enemy.effects || [];
   const enemyStunned = enemyFx.some(e => /stun/i.test(e.name || e.label || e.key || ''));
   const shredUp      = enemyFx.some(e => /defense change|defen|armor|shred|break/i.test(e.name || e.label || e.key || ''));
   const haveDef = (Object.values(state.teams?.ally?.players_by_num || {})[0]?.effects || [])
     .some(e => /def|guard|iron|shield|aegis/i.test(e.name || e.label || e.key || ''));
-
-  // 2) BRACE (sopravvivenza) — l'ultimate nemico parte quando la SUA risorsa è piena: se sta per
-  //    nukare, è un matchup pericoloso e non ho già DEF su → poppa Ironclad/guard. (regola tenuta)
   const eMax = enemy.advanced_resource_max || 0;
-  const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax && !enemyStunned;
-  if (S.pvp.survive && enemyNukeReady && !haveDef && (prof.bursty || !prof.C)) {
-    const def = usable.find(k => /ironclad/i.test(k.name)) || usable.find(k => /guard/i.test(k.name));
-    if (def) { S.pvp.note = 'brace(' + cls + ' nuke)'; return { id: def.id, tk: enemy.key }; }
+  // I NUKER (Assassino) lanciano il loro ULTIMATE appena la risorsa è piena — es. "Final Wish" è il
+  // loro Ragnarok (risorsa piena + token). Per i bursty bracciamo già al 75% così l'Ironclad è su
+  // PRIMA che colpiscano (al 100% reagirei troppo tardi). Per gli altri solo a barra piena.
+  const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax * (prof.bursty ? 0.75 : 1) && !enemyStunned;
+  const haveNuke = Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n)) || !!nukeSk;
+
+  // 1) LETALE: la skill affordable più economica (in token) che uccide ORA (≥ HP nemico).
+  const lethal = usable.filter(k => (dmgOf(k) || 0) >= ehp).sort((a, b) => cost(a) - cost(b))[0];
+  if (lethal) { S.pvp.note = 'lethal ' + lethal.name; return { id: lethal.id, tk: enemy.key }; }
+
+  // 0) APERTURA — primo mio turno: Ironclad per reggere il nuke d'apertura (molti partono a risorsa
+  //    piena e nukano subito). Ho 40 token a inizio match → Ironclad è sempre affordable al turno 1.
+  if ((myTurns || 0) === 0 && ironclad && !haveDef) {
+    S.pvp.note = 'opener ironclad'; return { id: ironclad.id, tk: enemy.key };
   }
 
-  // 3) RAGE PIENA → scarica la barra sul mio MIGLIOR nuke imparato (Ragnarok). MAI Slash: la barra
-  //    è turn-based, se non la spendo ORA si azzera → finestra persa (era IL bug dei 15 slash@full).
+  // 2) BRACE — il nemico sta per nukare (Assassino → "Final Wish", il suo Ragnarok: risorsa piena +
+  //    token) e non ho DEF su → Ironclad per ASSORBIRE il nuke. Per i bursty scatta già al 75% (DEF su
+  //    in tempo). A Rage piena Ironclad è la 2-turni. Salto vs healer puro. Token permettendo.
+  if (S.pvp.survive && enemyNukeReady && !haveDef && ironclad && !prof.healer && (prof.bursty || !prof.C)) {
+    S.pvp.note = 'brace(' + cls + ' nuke)'; return { id: ironclad.id, tk: enemy.key };
+  }
+
+  // 3) RAGE PIENA → Ragnarok (la barra è use-it-or-lose-it). Se non ho i 15 token NON sprecare il
+  //    colpo: fall-through a Slash (i token rigenerano, al prossimo ciclo nuko). Se il nuke non è
+  //    ancora nel DB, provalo per impararlo.
   if (atFull) {
+    const nuke = usable.find(k => k.requires_full_resource);
+    if (nuke) { S.pvp.note = nuke.name + '@full'; return { id: nuke.id, tk: enemy.key }; }
+    // l'ultimate ESISTE ma non ho i token (tokens < costo) → Slash per RICARICARE token, NON bruciare
+    // la finestra su un mid-skill (la Rage si azzera comunque, al prossimo ciclo nuko coi token su).
+    if (nukeSk && slash) { S.pvp.note = 'wait tokens (' + tokens + '/' + cost(nukeSk) + ')'; return { id: slash.id, tk: enemy.key }; }
+    // NESSUN ultimate equipaggiato → il payoff a Rage piena è il miglior colpo affordable conosciuto.
     const best = usable.filter(k => dmgOf(k) != null).sort((a, b) => (dmgOf(b) || 0) - (dmgOf(a) || 0))[0];
     if (best) { S.pvp.note = best.name + '@full'; return { id: best.id, tk: enemy.key }; }
-    const fullSk = usable.find(k => k.requires_full_resource);   // mai vista: provala per impararla
-    if (fullSk) { S.pvp.note = 'try ' + fullSk.name + '@full'; return { id: fullSk.id, tk: enemy.key }; }
+    if (slash) { S.pvp.note = 'build (slash)'; return { id: slash.id, tk: enemy.key }; }
   }
 
-  // un nuke a Rage piena lo conosco? (per decidere se vale la pena caricare con Slash)
-  const haveNuke = Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n)) || skills.some(k => k.requires_full_resource);
-  const warAura  = usable.find(k => /warrior aura/i.test(k.name));
-
-  // 4) STO PER RIEMPIRE (≥70%) → apri la difesa col Warrior Aura il turno PRIMA del nuke, così
-  //    Ragnarok il turno dopo colpisce a difesa abbassata. Solo se conosco un nuke e non sto vs healer.
-  if (!atFull && rage >= max * 0.7 && warAura && !shredUp && haveNuke && !prof.healer) {
-    S.pvp.note = 'war aura (shred pre-nuke)'; return { id: warAura.id, tk: enemy.key };
+  // 4) ULTIMO COLPO PRIMA DEL PIENO (rage ≥ max-25) → War Aura (shred), così a 100 Ragnarok colpisce
+  //    a difesa abbassata. MA solo se ho ≥ comboCost (21) token: War Aura ORA (6) + Ragnarok dopo (15).
+  //    Se non ho abbastanza token → continua a Slashare (gratis) per rigenerarli. Vale anche vs healer.
+  if (!atFull && rage >= max - 25 && warAuraSk && !shredUp && haveNuke && tokens >= comboCost) {
+    S.pvp.note = 'war aura (combo setup)'; return { id: warAuraSk.id, tk: enemy.key };
   }
 
-  // 5) SOTTO PIENA → miglior colpo che mi posso permettere, guidato dal DB. Stima la cura-per-colpo
-  //    IMPARATA del nemico: se lo Slash ci rende ancora (netto>0) e ho un nuke da caricare → builda
-  //    con Slash verso il pieno; altrimenti (es. guaritore che supera lo Slash) picchia col miglior
-  //    colpo netto conosciuto (Ironclad/Power Slash) invece di restare fermo su Slash.
-  const healHit = (prof.healer && prof.C) ? (prof.C.healed || 0) / Math.max(1, (prof.C.matches || 1) * 6) : 0;
-  const slashNet = (dmgOf({ name: 'Slash' }) || 0) - healHit;
-  if (haveNuke && slashNet > 0) {
-    const sl = skills.find(k => String(k.id) === '0');
-    if (sl) { S.pvp.note = 'build (slash→nuke)'; return { id: sl.id, tk: enemy.key }; }
-  }
-  const hitters = usable.filter(k => !k.requires_full_resource)
-    .map(k => ({ k, net: (dmgOf(k) || 0) - healHit, known: dmgOf(k) != null }))
-    .sort((a, b) => b.net - a.net);
-  const top = hitters.find(h => h.known && h.net > 0) || hitters.find(h => !h.known);
-  if (top) { S.pvp.note = (top.known ? 'best ' : 'probe ') + top.k.name; return { id: top.k.id, tk: enemy.key }; }
+  // 5) BUILD — Slash (gratis): carica Rage verso 100 E lascia rigenerare i token per la combo. È il
+  //    builder giusto in (quasi) ogni caso: NON spendere token su Ironclad/Power Slash come filler,
+  //    affamerebbe la combo (era il bug "usa sempre Ironclad e non arriva mai a Ragnarok").
+  if (slash && haveNuke) { S.pvp.note = 'build (slash→combo)'; return { id: slash.id, tk: enemy.key }; }
 
-  // 6) FALLBACK: Slash (builder più economico) — carica Rage verso il prossimo nuke a barra piena.
+  // 6) FALLBACK (nessun nuke conosciuto/equipaggiato) → miglior colpo affordable, o Slash.
+  const top = usable.filter(k => !k.requires_full_resource).sort((a, b) => (dmgOf(b) || 0) - (dmgOf(a) || 0))[0];
+  if (top && (dmgOf(top) || 0) > 0) { S.pvp.note = 'best ' + top.name; return { id: top.id, tk: enemy.key }; }
   S.pvp.note = 'build (slash)';
-  const slash = skills.find(k => String(k.id) === '0') || skills[skills.length - 1];
-  return { id: slash.id, tk: enemy.key };
+  return { id: (slash || skills[skills.length - 1]).id, tk: enemy.key };
 }
 
 function pvpEndMatch(state) {
@@ -1557,14 +1568,16 @@ async function pvpLoop() {
         continue;   // rileggi lo stato aggiornato al prossimo giro
       }
       if (s.turn?.side === 'ally') {              // solo: l'unico alleato sono io → mio turno
+        if (_pvpTurnMid !== S.pvp.cur) { _pvpTurnMid = S.pvp.cur; _pvpMyTurns = 0; }  // nuovo match → azzera
         const rageBefore = s.me?.advanced_resource || 0;
-        const p = pvpPick(s); if (!p) { await sleep(500); continue; }
+        const p = pvpPick(s, _pvpMyTurns); if (!p) { await sleep(500); continue; }
         S.pvp.lastPick = p.id + (S.pvp.note ? ' · ' + S.pvp.note : '');
         let d = await pvpAction(S.pvp.cur, s.last_log_id, p.id, p.tk);
         if (!d || d.ok === false) {               // race "Not your turn"/reject → rileggi e ripiega su Slash
           const s2 = await pvpState(S.pvp.cur);
           if (s2.turn?.side === 'ally') d = await pvpAction(S.pvp.cur, s2.last_log_id, '0', p.tk);
         }
+        _pvpMyTurns++;                             // un mio turno consumato (per l'apertura Ironclad)
         if (d && d.new_logs) pvpLearn(S.pvp.cur, d, d.new_logs, rageBefore);
         if (d?.match?.ended) pvpEndMatch(d);
         await sleep(220);
