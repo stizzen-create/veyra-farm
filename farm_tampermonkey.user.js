@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.46.0
+// @version      1.47.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -2020,6 +2020,8 @@ function renderLog() {
 // Sources are grouped by page (any URL). The 2s auto-render skips this tab so
 // typing/focus isn't lost; "💾" persists + rebuilds the runtime WAVES.
 const _scan = {};   // source.id → [{name, count, boss}] from the last live scan
+let _scanFlash = null;   // {msg, ok, ts} — transient confirmation banner shown in the Setup
+                         // tab so a click on 🔍 Scan is always visibly acknowledged.
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
   ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
@@ -2118,7 +2120,15 @@ async function scanDungeonLocation(locUrl, liveDoc, label) {
 // Reads document directly → no fetch, no cookie race. Creates/refreshes the
 // matching source in S.config and stores its mob checklist in _scan[source.id].
 async function scanCurrentPage(btn) {
-  if (btn) btn.textContent = '⏳';
+  // instant click feedback: mutate the live button + yield a paint frame BEFORE the
+  // (mostly synchronous) DOM scan runs, so the press is always visible even when the
+  // scan finishes in a few ms (user: "non capisco se clicca o meno").
+  if (btn) {
+    btn.textContent = '⏳ Scanning…';
+    btn.style.background = '#3a5a9a';
+    btn.disabled = true;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
   const url = currentPageUrl();
 
   // ── GUILD DUNGEON boss page: battle.php?dgmid=…&instance_id=… ──
@@ -2147,7 +2157,7 @@ async function scanCurrentPage(btn) {
     }
     save();
     log(`🏰 dungeon added: ${bossName} (dgmid ${dgmid}) — set the damage and press 💾`, '#9060ff');
-    renderSettings();
+    flashScan(`🏰 dungeon boss added: ${bossName} — set the damage & press 💾`);
     return;
   }
 
@@ -2161,7 +2171,7 @@ async function scanCurrentPage(btn) {
     const { src, list, mons } = await scanDungeonLocation(url, document, label);
     save();
     log(`🏰 location ${src.label}: ${list.length} monster types (${mons.length} instances${mons.length && mons.every(m=>m.dead) ? ', all dead now' : ''}) — tick them, set damage, press 💾`, '#9060ff');
-    renderSettings();
+    flashScan(`🏰 ${list.length} monster types found — tick them below`, list.length > 0);
     return;
   }
 
@@ -2176,7 +2186,7 @@ async function scanCurrentPage(btn) {
       .filter(a => /guild_dungeon_location\.php/i.test(a.url) && !seen.has(a.url) && seen.add(a.url));
     if (!locLinks.length) {
       log('⚠ no locations found on this instance page — open a single location and scan that', '#f66');
-      renderSettings();
+      flashScan('⚠ no locations found here — open a single location and scan that', false);
       return;
     }
     let totalTypes = 0, totalMons = 0;
@@ -2187,7 +2197,7 @@ async function scanCurrentPage(btn) {
     }
     save();
     log(`🏰 instance: ${locLinks.length} locations · ${totalTypes} monster types (${totalMons} instances) — tick the ones to farm, set damage, press 💾`, '#9060ff');
-    renderSettings();
+    flashScan(`🏰 ${locLinks.length} locations · ${totalTypes} monster types found`, totalTypes > 0);
     return;
   }
 
@@ -2199,8 +2209,7 @@ async function scanCurrentPage(btn) {
   // Invalid ids return a ~20-byte 4xx and PvP-only rooms have no .mon → both are skipped cheaply.
   if (pu.pathname.includes('guild_dungeon_cube.php')) {
     const instId = pu.searchParams.get('instance_id');
-    if (!instId) { log('⚠ cube: missing instance_id in URL', '#f66'); renderSettings(); return; }
-    if (btn) btn.textContent = '⏳';
+    if (!instId) { log('⚠ cube: missing instance_id in URL', '#f66'); flashScan('⚠ cube: missing instance_id in URL', false); return; }
     let found = 0, types = 0, mobs = 0;
     for (let loc = 1; loc <= 40; loc++) {
       const lurl = `${BASE}/guild_dungeon_location.php?instance_id=${instId}&location_id=${loc}`;
@@ -2217,7 +2226,7 @@ async function scanCurrentPage(btn) {
     log(found
       ? `🏰 cube ${instId}: ${found} farmable sections · ${types} monster types (${mobs} mobs) — tick them, set damage, press 💾`
       : `⚠ cube ${instId}: no farmable sections found (probed location_id 1–40)`, found ? '#9060ff' : '#f66');
-    renderSettings();
+    flashScan(found ? `🏰 cube: ${found} farmable sections · ${types} monster types` : '⚠ cube: no farmable sections found', !!found);
     return;
   }
 
@@ -2250,7 +2259,7 @@ async function scanCurrentPage(btn) {
   const list = Object.entries(distinct).map(([name, count]) => ({
     name, count,
     boss: bossNames.some(bn => bn.split(',')[0] && name.includes(bn.split(',')[0]))
-        || /general|king|titan|herald|hunter|emperor|lord|queen|god|eternal/i.test(name),
+        || /general|king|titan|herald|hunter|emperor|lord|queen|god|eternal|hermes|divine|olymp/i.test(name),
   }));
 
   // Also surface AUTO-SUMMON boss cards (the timed bosses — Hermes, Pan, …). They are
@@ -2269,7 +2278,7 @@ async function scanCurrentPage(btn) {
   let src = S.config.find(w => srcUrl(w) === url);
   if (!src && !list.length) {
     log('⚠ no alive mobs here. Waves sometimes only show bosses (trash not spawned yet). Guild dungeons use a different system (open the boss battle page and scan that).', '#f66');
-    renderSettings();
+    flashScan('⚠ no alive monsters found on this page', false);
     return;
   }
   if (!src) {
@@ -2279,7 +2288,21 @@ async function scanCurrentPage(btn) {
   _scan[src.id] = list;
   save();
   log(`⚙ scan ${src.label}: ${list.length} alive mobs`, '#9060ff');
-  renderSettings();
+  const bossN = list.filter(r => r.boss).length;
+  flashScan(`✓ ${list.length} monsters found${bossN ? ` (${bossN} boss)` : ''} — tick the ones to add`, list.length > 0);
+}
+
+// Show a transient confirmation banner in the Setup tab after a scan, then clear it.
+// Re-renders only while the Setup tab is open (so it doesn't fight the status loop).
+function flashScan(msg, ok = true) {
+  _scanFlash = { msg, ok, ts: Date.now() };
+  if (activeTab === 'settings') renderSettings();
+  setTimeout(() => {
+    if (_scanFlash && Date.now() - _scanFlash.ts >= 3300) {
+      _scanFlash = null;
+      if (activeTab === 'settings') renderSettings();
+    }
+  }, 3500);
 }
 
 function renderSettings() {
@@ -2344,94 +2367,131 @@ function renderSettings() {
     </div>
     <div style="color:#667;font-size:10px;margin-bottom:8px;line-height:1.5">
       You're on: <span style="color:#9cf">${esc(pageLabel(curUrl))}</span><br>
-      Open a wave or guild-dungeon page → <b style="color:#9cf">Scan this page</b> → tick the
-      monsters to attack, set the damage and type → <b style="color:#7f8">Save</b>. ✕ removes a target.
+      Open a wave / boss / guild-dungeon page → <b style="color:#9cf">Scan this page</b> → the
+      monsters appear under <b style="color:#9cf">Scan results</b>; tick one to add it to
+      <b style="color:#7f8">Set targets</b> above, set its damage &amp; type. ✕ removes it.
     </div>`;
 
-  if (!S.config.length) {
-    h += `<div style="color:#556;font-size:11px;padding:6px 2px">No pages yet. Open a wave or dungeon and press 🔍 Scan this page.</div>`;
+  // transient scan confirmation banner (set by flashScan after a 🔍 Scan)
+  if (_scanFlash && Date.now() - _scanFlash.ts < 3400) {
+    h += `<div style="background:${_scanFlash.ok ? '#143226' : '#3a2416'};
+      color:${_scanFlash.ok ? '#7ff0a8' : '#ffb877'};border-radius:6px;
+      padding:7px 9px;margin-bottom:8px;font-size:11px;font-weight:bold">${esc(_scanFlash.msg)}</div>`;
   }
 
+  // ── Editable row for one target/monster. Works both for a CONFIGURED target (on →
+  // shows the dmg + mode + kill controls) and a freshly-SCANNED, not-yet-added mob
+  // (off → just the add checkbox + name). srcLabel shows the page when a group spans
+  // more than one page. wi is the S.config index; name/handlers are unchanged.
+  const targetRow = (wi, w, name, boss, count, srcLabel) => {
+    const t   = targetFor(w, name);
+    const on  = !!t;
+    const grp = `mode_${wi}_${String(name).replace(/\W+/g, '_')}`;
+    let s = `<div style="border:1px solid ${on?'#2f5040':'#23253f'};border-radius:6px;padding:5px 6px;margin-bottom:5px;background:#0e0e18">
+      <div style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" data-act="row" data-wi="${wi}" data-name="${esc(name)}" ${on?'checked':''}>
+        <span style="flex:1;color:${boss?'#fab':'#7df'};font-size:12px">${boss?'👑 ':''}${esc(name)}${count!=null?` <span style="color:#556">×${count}</span>`:''}${srcLabel?`<br><span style="color:#556;font-size:9px">📄 ${esc(srcLabel)}</span>`:''}</span>
+        ${on?`<button data-action="deltarget" data-wi="${wi}" data-name="${esc(name)}" title="remove target" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:1px 7px;cursor:pointer;font:12px monospace">✕</button>`:''}
+      </div>`;
+    if (on) {
+      const mode = t.dungeonBoss ? 'dungeonboss' : (t.timer ? 'timed' : 'farm');
+      const farm = mode === 'farm';
+      const dgb  = mode === 'dungeonboss';
+      s += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-left:22px">
+        <span style="color:#9cf;font-size:10px">${dgb ? 'max dmg' : 'stop at'}</span>
+        <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="${dgb ? 'GUILD CAP — the bot stops STRICTLY under this much damage (never crosses it)' : "stop attacking once you've dealt this much damage"}">
+        <label style="color:#fab;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Timed boss: fight to the damage target, then move on (may use potions)">
+          <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="timed" ${mode==='timed'?'checked':''}> ⏰ Timed
+        </label>
+        <label style="color:#c9a0ff;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Dungeon boss: auto-detects the room opening (polls ~3s, AFK), drinks a potion the instant the boss appears, and stops STRICTLY UNDER the damage cap above — never overshoots the guild limit">
+          <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="dungeonboss" ${dgb?'checked':''}> 🏰 Dungeon Boss
+        </label>
+        <label style="color:#7df;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Farm: kill regular monsters (no potions)">
+          <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
+      if (farm) s += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
+      if (dgb)  s += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacca da solo appena la stanza apre (~3s, AFK) e si ferma <b>sotto</b> ${esc(fmtDmg(t.dmgTarget))} — mai oltre il limite gilda</div>`;
+      s += `</div>`;
+    }
+    s += `</div>`;
+    return s;
+  };
+
+  // guild-dungeon (dgmid) source: a single boss with just a damage field
+  const dungeonRow = (wi, w, srcLabel) => {
+    const t = (w.targets || [])[0];
+    return `<div style="border:1px solid #2f5040;border-radius:6px;padding:5px 6px;margin-bottom:5px;background:#0e0e18">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="flex:1;color:#c9a0ff;font-size:12px">🏰 ${esc((t&&t.label)||w.label)} <span style="color:#556;font-size:9px">dgmid ${esc(w.dgmid)}</span></span>
+        <span style="color:#9cf;font-size:10px">stop at</span>
+        <input style="${IN};width:74px" data-fld="dmg" data-wi="${wi}" data-name="${esc((t&&(t.srcName||t.label))||'')}" value="${esc(fmtDmg(t?t.dmgTarget:0))}">
+        <button data-action="delwave" data-wi="${wi}" title="delete" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font:11px monospace">🗑</button>
+      </div>
+      ${srcLabel?`<div style="color:#556;font-size:9px;margin-top:3px">📄 ${esc(srcLabel)}</div>`:''}</div>`;
+  };
+
+  // ── SET TARGETS — every configured target, grouped by type ──────────────────────
+  const groups = { timed: [], dungeonboss: [], farm: [] };
   S.config.forEach((w, wi) => {
-    const url       = srcUrl(w);
-    const isCurrent = url === curUrl;
-    const activeN   = (w.targets || []).filter(t => t.enabled !== false).length;
-    h += `<div style="border:1px solid ${isCurrent?'#2f8050':'#2b2e49'};border-radius:8px;padding:7px;margin-bottom:8px;background:#10101c">
-      <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+    if (w.kind === 'dungeon') { groups.dungeonboss.push({ dungeon: true, wi, w }); return; }
+    for (const t of (w.targets || [])) {
+      const mode = t.dungeonBoss ? 'dungeonboss' : (t.timer ? 'timed' : 'farm');
+      groups[mode].push({ wi, w, name: t.srcName || t.label, boss: !!t.timer });
+    }
+  });
+  const totalSet = groups.timed.length + groups.dungeonboss.length + groups.farm.length;
+
+  h += `<div style="color:#9cf;font-size:11px;font-weight:bold;margin:6px 0 5px">📋 Set targets <span style="color:#556;font-weight:normal">· ${totalSet}</span></div>`;
+  if (!totalSet) {
+    h += `<div style="color:#556;font-size:11px;padding:2px 2px 6px">Nothing set yet — scan a page below and tick a monster to add it here.</div>`;
+  } else {
+    const groupBlock = (key, icon, title, col) => {
+      const arr = groups[key];
+      if (!arr.length) return '';
+      const multiPage = new Set(arr.map(e => e.wi)).size > 1;
+      let s = `<div style="color:${col};font-size:11px;font-weight:bold;margin:8px 0 4px">${icon} ${title} <span style="color:#556;font-weight:normal">· ${arr.length}</span></div>`;
+      for (const e of arr) {
+        const lbl = multiPage ? (e.w.label || pageLabel(srcUrl(e.w))) : '';
+        s += e.dungeon ? dungeonRow(e.wi, e.w, lbl)
+                       : targetRow(e.wi, e.w, e.name, e.boss, null, lbl);
+      }
+      return s;
+    };
+    h += groupBlock('timed',       '⏰', 'Timed bosses',   '#fab');
+    h += groupBlock('dungeonboss', '🏰', 'Dungeon bosses', '#c9a0ff');
+    h += groupBlock('farm',        '🎯', 'Farm',           '#7df');
+  }
+
+  // ── SCAN RESULTS — monsters found on the CURRENT page that aren't set yet ────────
+  const curSrc = S.config.find(w => w.kind !== 'dungeon' && srcUrl(w) === curUrl);
+  const curWi  = curSrc ? S.config.indexOf(curSrc) : -1;
+  const scanList = curSrc ? (_scan[curSrc.id] || []) : [];
+  const toAdd = curSrc ? scanList.filter(r => !targetFor(curSrc, r.name)) : [];
+
+  h += `<div style="border-top:1px solid #2a2a44;margin:10px 0 6px"></div>`;
+  h += `<div style="color:#9cf;font-size:11px;font-weight:bold;margin:4px 0 5px">🔍 Scan results <span style="color:#556;font-weight:normal">· ${esc(pageLabel(curUrl))}</span></div>`;
+  if (!curSrc || !scanList.length) {
+    h += `<div style="color:#556;font-size:11px;padding:2px">Press <b style="color:#9cf">🔍 Scan this page</b> to list this page's monsters here.</div>`;
+  } else if (!toAdd.length) {
+    h += `<div style="color:#556;font-size:11px;padding:2px">✓ every monster found here is already set above.</div>`;
+  } else {
+    for (const r of toAdd) h += targetRow(curWi, curSrc, r.name, r.boss, r.count, '');
+  }
+
+  // ── PAGES — enable / rename / delete each scanned source ─────────────────────────
+  if (S.config.length) {
+    h += `<div style="border-top:1px solid #2a2a44;margin:10px 0 6px"></div>`;
+    h += `<div style="color:#9cf;font-size:11px;font-weight:bold;margin:4px 0 5px">📄 Pages <span style="color:#556;font-weight:normal">· ${S.config.length}</span></div>`;
+    S.config.forEach((w, wi) => {
+      const url = srcUrl(w), isCurrent = url === curUrl;
+      const nt  = (w.targets || []).length;
+      h += `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;background:#10101c;border:1px solid ${isCurrent?'#2f8050':'#23253f'};border-radius:6px;padding:5px 6px">
         <input type="checkbox" data-act="wave-enable" data-wi="${wi}" ${w.enabled!==false?'checked':''} title="page on/off">
         <input style="${IN};flex:1" data-fld="label" data-wi="${wi}" value="${esc(w.label || pageLabel(url))}">
-        ${activeN?`<span style="color:#2f8;font-size:10px">${activeN} active</span>`:`<span style="color:#556;font-size:10px">0 active</span>`}
+        <span style="color:${isCurrent?'#2f8':'#556'};font-size:9px;white-space:nowrap">${isCurrent?'● here · ':''}${nt}t</span>
         <button data-action="delwave" data-wi="${wi}" title="delete page" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font:11px monospace">🗑</button>
-      </div>
-      <div style="color:#556;font-size:9px;margin-bottom:6px">${isCurrent?'<span style="color:#2f8">● this page</span>':'open this page to re-scan'}</div>`;
-
-    // ── DUNGEON source: single boss, just a damage field (no scan checklist) ──
-    if (w.kind === 'dungeon') {
-      const t = (w.targets || [])[0];
-      h += `<div style="font-size:10px;color:#9cf;margin-bottom:4px">🏰 dungeon boss · dgmid ${esc(w.dgmid)}</div>`;
-      if (t) {
-        h += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:3px 2px">
-          <span style="color:#fab;font-size:12px;flex:1">${esc(t.label)}</span>
-          <span style="color:#9cf;font-size:10px">stop at</span>
-          <input style="${IN};width:74px" data-fld="dmg" data-wi="${wi}" data-name="${esc(t.srcName || t.label)}" value="${esc(fmtDmg(t.dmgTarget))}">
-        </div>
-        <div style="color:#556;font-size:9px;margin-top:3px">hits until this damage (or the boss dies) · the dgmid expires on reset: re-open the page and re-scan</div>`;
-      }
-      h += `</div>`;
-      return;
-    }
-
-    // rows = scanned mobs, then any saved target not present in the current scan
-    const scanned = _scan[w.id] || [];
-    const seen = new Set(scanned.map(r => r.name));
-    const rows = scanned.slice();
-    for (const t of (w.targets || [])) {
-      const nm = t.srcName || t.label;
-      if (!seen.has(nm)) { rows.push({ name: nm, count: null, boss: !!t.timer }); seen.add(nm); }
-    }
-
-    if (!rows.length) {
-      h += `<div style="color:#556;font-size:11px;padding:2px">open this page and press 🔍 to list its monsters</div>`;
-    }
-
-    rows.forEach((r, idx) => {
-      const t   = targetFor(w, r.name);
-      const on  = !!t;
-      const grp = `mode_${wi}_${idx}`;
-      h += `<div style="border:1px solid ${on?'#2f5040':'#23253f'};border-radius:6px;padding:5px 6px;margin-bottom:5px;background:#0e0e18">
-        <div style="display:flex;align-items:center;gap:6px">
-          <input type="checkbox" data-act="row" data-wi="${wi}" data-name="${esc(r.name)}" ${on?'checked':''}>
-          <span style="flex:1;color:${r.boss?'#fab':'#7df'};font-size:12px">${r.boss?'👑 ':''}${esc(r.name)}${r.count!=null?` <span style="color:#556">×${r.count}</span>`:''}</span>
-          ${on?`<button data-action="deltarget" data-wi="${wi}" data-name="${esc(r.name)}" title="remove target" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:1px 7px;cursor:pointer;font:12px monospace">✕</button>`:''}
-        </div>`;
-      if (on) {
-        const mode = t.dungeonBoss ? 'dungeonboss' : (t.timer ? 'timed' : 'farm');
-        const farm = mode === 'farm';
-        const dgb  = mode === 'dungeonboss';
-        h += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-left:22px">
-          <span style="color:#9cf;font-size:10px">${dgb ? 'max dmg' : 'stop at'}</span>
-          <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="${dgb ? 'GUILD CAP — the bot stops STRICTLY under this much damage (never crosses it)' : "stop attacking once you've dealt this much damage"}">
-          <label style="color:#fab;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Timed boss: fight to the damage target, then move on (may use potions)">
-            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="timed" ${mode==='timed'?'checked':''}> ⏰ Timed
-          </label>
-          <label style="color:#c9a0ff;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Dungeon boss: auto-detects the room opening (polls ~3s, AFK), drinks a potion the instant the boss appears, and stops STRICTLY UNDER the damage cap above — never overshoots the guild limit">
-            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="dungeonboss" ${dgb?'checked':''}> 🏰 Dungeon Boss
-          </label>
-          <label style="color:#7df;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Farm: kill regular monsters (no potions)">
-            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
-        if (farm) {
-          h += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
-        }
-        if (dgb) {
-          h += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacca da solo appena la stanza apre (~3s, AFK) e si ferma <b>sotto</b> ${esc(fmtDmg(t.dmgTarget))} — mai oltre il limite gilda</div>`;
-        }
-        h += `</div>`;
-      }
-      h += `</div>`;
+      </div>`;
     });
-
-    h += `</div>`;
-  });
+  }
 
   uiContent.innerHTML = h;
   wireSettings();
@@ -2848,7 +2908,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.46.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.47.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
