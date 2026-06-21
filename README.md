@@ -23,8 +23,9 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
   - normal **wave mobs** (`active_wave.php`)
   - **timed bosses** — a priority pass fights them the moment they’re up
   - **guild‑dungeon bosses** (`battle.php?dgmid`)
-  - **guild‑dungeon locations** (`guild_dungeon_location.php` — many instances, farmed by monster name)
+  - **guild‑dungeon locations** (`guild_dungeon_location.php` — many instances, farmed by monster name). You can also scan the whole **instance overview** (`guild_dungeon_instance.php`) to add every zone at once, or a **cube dungeon** (`guild_dungeon_cube.php`) — it probes the instance and adds each PvE section + boss room.
   - **Adventurer’s Guild quests** — auto accept → farm the quest mob → turn in → next (respects the 2‑day rotation)
+- **⚔ Auto‑PvP** (solo ladder) — toggle it on and the bot self‑matchmakes, plays each turn data‑driven from a per‑enemy‑class DB it **learns** every match (including empowered full‑resource skills), runs a lethal check and a survival brace, and adapts (e.g. races fast/“out‑damaging” classes like Assassins instead of slow‑building). ⚠️ **Tuned for the Berserker kit only** — the skill‑selection logic is **hardcoded around the Berserker’s Rage skills** (Slash / Power Slash / Warrior Aura / Ironclad Strike / Ragnarok Cleave). On other advanced classes it may pick the wrong skills or fall back to weak hits, so **run Auto‑PvP on a Berserker** for now. (Enemy‑class reading and learning are generic; only *your* kit is assumed.)
 - **Exact‑damage hits** — composes 1 / 10 / 50‑stamina attack tiers to land within one small hit of your target (minimal overshoot), which also maximizes per‑hit proc chances.
 - **Auto‑loot** every dead mob it’s responsible for, **auto‑heal** on death, and smart **stamina‑potion** use (only when truly out of stamina, and only the potions you allow).
 - **“Scan this page”** — open any wave or dungeon page, scan it, tick the monsters to attack, set the damage and the mode (⏰ Timed / 🎯 Farm). Edits apply **live**.

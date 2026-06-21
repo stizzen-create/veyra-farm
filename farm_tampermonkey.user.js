@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.41.0
+// @version      1.43.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -87,6 +87,7 @@ function pageLabel(url) {
       if (p.get('event'))                 return `Ev${p.get('event')}W${p.get('wave') || '?'}`;
     }
     if (u.pathname.includes('battle.php') && p.get('dgmid')) return `🏰 Dungeon boss ${p.get('dgmid')}`;
+    if (u.pathname.includes('guild_dungeon_instance.php')) return `🏰 Dungeon instance ${p.get('id') || ''}`.trim();
     if (u.pathname.includes('guild_dungeon_location.php')) return `🏰 Guild dungeon ${p.get('location_id') || ''}`.trim();
     if (u.pathname.includes('gate.php')) return `Gate ${p.get('id') || ''}`.trim();
     if (u.pathname.includes('wave.php')) return `Wave ${p.get('id') || ''}`.trim();
@@ -1456,7 +1457,22 @@ function pvpPick(state, myTurns) {
   // loro Ragnarok (risorsa piena + token). Per i bursty bracciamo già al 75% così l'Ironclad è su
   // PRIMA che colpiscano (al 100% reagirei troppo tardi). Per gli altri solo a barra piena.
   const enemyNukeReady = eMax > 0 && (enemy.advanced_resource || 0) >= eMax * (prof.bursty ? 0.75 : 1) && !enemyStunned;
+  const enemyResFull   = eMax > 0 && (enemy.advanced_resource || 0) >= eMax && !enemyStunned;
   const haveNuke = Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n)) || !!nukeSk;
+
+  // RACE MODE — contro nemici VELOCI/bursty o che storicamente ti battono a DPS (`out-damaged`,
+  // es. l'Assassino): NON rallentare con Slash (45k) come filler né sprecare turni in Ironclad.
+  // Corri col miglior colpo affordable (Power Slash ~455k) tenendo i token per il Ragnarok a Rage
+  // piena. Eccezione: le classi che ti uccidono col NUKE (es. Magic Knight → `their nuke`) → la
+  // parata resta giusta, quindi NON entrare in race (nukeKiller).
+  const lr = (prof.C && prof.C.lossReasons) || {};
+  const outDmgLosses = lr['out-damaged'] || 0, nukeLosses = lr['their nuke'] || 0;
+  const dpm = (prof.C && prof.C.dmgToMe || 0) / Math.max(1, prof.C && prof.C.matches || 0);
+  const nukeKiller = nukeLosses >= 1 && outDmgLosses === 0;   // ti batte SOLO col nuke → para
+  const race = !nukeKiller && (prof.bursty || outDmgLosses >= 1 || dpm > 400000);
+  // miglior colpo NON-ultimate affordable (di norma Power Slash) — il workhorse della race
+  const powerHit = usable.filter(k => !k.requires_full_resource && String(k.id) !== '0')
+    .sort((a, b) => (dmgOf(b) || 0) - (dmgOf(a) || 0))[0];
 
   // 1) LETALE: la skill affordable più economica (in token) che uccide ORA (≥ HP nemico).
   const lethal = usable.filter(k => (dmgOf(k) || 0) >= ehp).sort((a, b) => cost(a) - cost(b))[0];
@@ -1464,14 +1480,17 @@ function pvpPick(state, myTurns) {
 
   // 0) APERTURA — primo mio turno: Ironclad per reggere il nuke d'apertura (molti partono a risorsa
   //    piena e nukano subito). Ho 40 token a inizio match → Ironclad è sempre affordable al turno 1.
-  if ((myTurns || 0) === 0 && ironclad && !haveDef) {
+  if ((myTurns || 0) === 0 && ironclad && !haveDef && !race) {
     S.pvp.note = 'opener ironclad'; return { id: ironclad.id, tk: enemy.key };
   }
 
   // 2) BRACE — il nemico sta per nukare (Assassino → "Final Wish", il suo Ragnarok: risorsa piena +
   //    token) e non ho DEF su → Ironclad per ASSORBIRE il nuke. Per i bursty scatta già al 75% (DEF su
   //    in tempo). A Rage piena Ironclad è la 2-turni. Salto vs healer puro. Token permettendo.
-  if (S.pvp.survive && enemyNukeReady && !haveDef && ironclad && !prof.healer && (prof.bursty || !prof.C)) {
+  //    In RACE mode NON bracciamo al 75% (regalerebbe la gara di DPS): paro SOLO quando la risorsa
+  //    nemica è davvero al 100% (Final Wish imminente) e non posso vincere lo scambio ora.
+  const braceNow = race ? (enemyResFull && tokens < cost(nukeSk || {})) : enemyNukeReady;
+  if (S.pvp.survive && braceNow && !haveDef && ironclad && !prof.healer && (prof.bursty || !prof.C)) {
     S.pvp.note = 'brace(' + cls + ' nuke)'; return { id: ironclad.id, tk: enemy.key };
   }
 
@@ -1495,6 +1514,16 @@ function pvpPick(state, myTurns) {
   //    Se non ho abbastanza token → continua a Slashare (gratis) per rigenerarli. Vale anche vs healer.
   if (!atFull && rage >= max - 25 && warAuraSk && !shredUp && haveNuke && tokens >= comboCost) {
     S.pvp.note = 'war aura (combo setup)'; return { id: warAuraSk.id, tk: enemy.key };
+  }
+
+  // 4b) RACE FILLER — vs nemici veloci/bursty il riempitivo NON è Slash (45k) ma il miglior colpo
+  //     affordable (Power Slash ~455k): così vinci la gara di DPS invece di farti logorare. Tieni da
+  //     parte i 15 token del Ragnarok SOLO se la Rage è già vicina al pieno (al prossimo turno nuko).
+  if (race && powerHit && (dmgOf(powerHit) || 0) > (dmgOf(slash) || 0)) {
+    const reserve = (rage >= max - 25 && nukeSk) ? cost(nukeSk) : 0;
+    if (tokens - cost(powerHit) >= reserve) {
+      S.pvp.note = 'race ' + powerHit.name; return { id: powerHit.id, tk: enemy.key };
+    }
   }
 
   // 5) BUILD — Slash (gratis): carica Rage verso 100 E lascia rigenerare i token per la combo. È il
@@ -1533,6 +1562,35 @@ function pvpEndMatch(state) {
   S.pvp.cur = null; _pvpUrlConsumed = true; save();
   const prof = pvpProfile(cls);
   log(`⚔ PvP ${win ? 'WIN' : 'LOSS'} vs ${cls}${prof.healer ? ' (healer)' : ''}${prof.bursty ? ' (nuker)' : ''} · ${reason} · myDmg ${fmtDmg(st.myDmg)} / theirHeal ${fmtDmg(st.enemyHeal)} / theirBig ${fmtDmg(st.enemyBig)} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
+}
+
+// build a HUMAN-READABLE .txt report (per-class W/L + loss reasons + their big hit),
+// with the raw JSON appended at the bottom for deep analysis. Used by the export button.
+function pvpExportText() {
+  const p = S.pvp, db = p.db || { classes: {}, my: {} };
+  const tot = (p.wins || 0) + (p.losses || 0);
+  const L = [];
+  L.push('VEYRA PvP — export ' + new Date().toLocaleString());
+  L.push('Record: ' + (p.wins || 0) + 'W / ' + (p.losses || 0) + 'L'
+    + (tot ? '  (' + Math.round((p.wins || 0) / tot * 100) + '%)' : ''));
+  L.push('');
+  L.push('PER-CLASS (worst winrate first):');
+  const rows = Object.values(db.classes || {}).map(C => {
+    const m = C.matches || 0, l = C.losses || 0, w = m - l;
+    return { C, m, l, w, wr: m ? Math.round(w / m * 100) : 0 };
+  }).sort((a, b) => a.wr - b.wr || b.m - a.m);
+  for (const r of rows) {
+    const C = r.C;
+    const big = C.bigHit ? (C.bigHit.skill + ' ' + (C.bigHit.dmg || 0).toLocaleString()) : '—';
+    const lr  = C.lossReasons ? Object.entries(C.lossReasons).map(([k, v]) => k + '×' + v).join(', ') : '';
+    L.push('  ' + String(C.class || '?').padEnd(14)
+      + (r.w + 'W/' + r.l + 'L').padEnd(8) + String(r.wr + '%').padStart(4)
+      + '  · big hit: ' + big + (lr ? '  · losses: ' + lr : ''));
+  }
+  L.push('');
+  L.push('=== RAW DATA (JSON, for analysis) ===');
+  L.push(JSON.stringify({ wins: p.wins, losses: p.losses, db, matches: p.matches }, null, 2));
+  return L.join('\n');
 }
 
 async function pvpLoop() {
@@ -1935,6 +1993,47 @@ function currentPageUrl() {
   return u.toString();
 }
 
+// Add/refresh ONE guild-dungeon LOCATION (guild_dungeon_location.php) as a 'dungeonloc'
+// source and fill its mob checklist (_scan[src.id]). Shared by the location-page scan and
+// the INSTANCE-page scan (which iterates every location). When `liveDoc` is given (user is
+// on the location page) it reads the live DOM; otherwise it fetches the page. Lists DEAD
+// instances too, so you can add them while everything is on cooldown.
+async function scanDungeonLocation(locUrl, liveDoc, label) {
+  const lu  = new URL(locUrl, location.href);
+  const url = lu.toString();
+  let mons = liveDoc ? _collectDungeonMons(liveDoc) : [];
+  if (!mons.length) {
+    const html = await getHtml(url);
+    if (html) mons = parseDungeonMons(html);
+  }
+  const instId = lu.searchParams.get('instance_id');
+  const locId  = lu.searchParams.get('location_id');
+  let src = S.config.find(w => w.kind === 'dungeonloc' && srcUrl(w) === url);
+  if (!src) {
+    src = {
+      id: 'dl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      kind: 'dungeonloc', url, instance_id: instId, location_id: locId,
+      label: label || pageLabel(url) || ('Location ' + (locId || '')),
+      enabled: true, targets: [],
+    };
+    S.config.push(src);
+  } else { src.url = url; src.instance_id = instId; src.location_id = locId; if (label) src.label = label; }
+
+  const distinct = {};
+  for (const m of mons) {
+    const nm = m.name || '?';
+    distinct[nm] = distinct[nm] || { total: 0, dead: 0 };
+    distinct[nm].total++; if (m.dead) distinct[nm].dead++;
+  }
+  // boss:false → mkTarget builds a FARM-style target (no potions, kill counter); the user
+  // can flip any to ⏰ Timed (potions) from the checklist if they want.
+  const list = Object.entries(distinct)
+    .map(([name, c]) => ({ name, count: c.total, boss: false }))
+    .sort((a, b) => b.count - a.count);
+  _scan[src.id] = list;
+  return { src, list, mons };
+}
+
 // Scan the LIVE page the user is on (any URL: wave, event, gate, guild dungeon).
 // Reads document directly → no fetch, no cookie race. Creates/refreshes the
 // matching source in S.config and stores its mob checklist in _scan[source.id].
@@ -1978,38 +2077,66 @@ async function scanCurrentPage(btn) {
   // the loop re-reads the page each pass. Lists DEAD instances too, so you can add them
   // while everything is dead / on cooldown (the user's exact case).
   if (pu.pathname.includes('guild_dungeon_location.php')) {
-    let mons = _collectDungeonMons(document);
-    if (!mons.length) {                       // not in the live DOM → fetch the page
-      const html = await getHtml(url);
-      if (html) mons = parseDungeonMons(html);
-    }
-    const instId2 = pu.searchParams.get('instance_id');
-    const locId   = pu.searchParams.get('location_id');
-    let src = S.config.find(w => w.kind === 'dungeonloc' && srcUrl(w) === url);
-    if (!src) {
-      src = {
-        id: 'dl' + Date.now().toString(36), kind: 'dungeonloc', url,
-        instance_id: instId2, location_id: locId,
-        label: (document.title || 'Guild dungeon').replace(/\s*[—\-|·].*$/, '').trim() || pageLabel(url),
-        enabled: true, targets: [],
-      };
-      S.config.push(src);
-    } else { src.url = url; src.instance_id = instId2; src.location_id = locId; }
-
-    const distinct = {};
-    for (const m of mons) {
-      const nm = m.name || '?';
-      distinct[nm] = distinct[nm] || { total: 0, dead: 0 };
-      distinct[nm].total++; if (m.dead) distinct[nm].dead++;
-    }
-    // boss:false → mkTarget builds a FARM-style target (no potions, kill counter); the
-    // user can flip any to ⏰ Timed (potions) from the checklist if they want.
-    const list = Object.entries(distinct)
-      .map(([name, c]) => ({ name, count: c.total, boss: false }))
-      .sort((a, b) => b.count - a.count);
-    _scan[src.id] = list;
+    const label = (document.title || 'Guild dungeon').replace(/\s*[—\-|·].*$/, '').trim() || pageLabel(url);
+    const { src, list, mons } = await scanDungeonLocation(url, document, label);
     save();
     log(`🏰 location ${src.label}: ${list.length} monster types (${mons.length} instances${mons.length && mons.every(m=>m.dead) ? ', all dead now' : ''}) — tick them, set damage, press 💾`, '#9060ff');
+    renderSettings();
+    return;
+  }
+
+  // ── GUILD DUNGEON INSTANCE page: guild_dungeon_instance.php?id=… ──
+  // The instance index lists its LOCATIONS (each → guild_dungeon_location.php). Scan ALL of
+  // them in one go: fetch each, create a dungeonloc source with its mob checklist. Then the
+  // user ticks the bosses/mobs to farm across the locations and sets the damage.
+  if (pu.pathname.includes('guild_dungeon_instance.php')) {
+    const seen = new Set();
+    const locLinks = [...document.querySelectorAll('a[href]')]
+      .map(a => ({ url: a.href, text: (a.textContent || '').replace(/\s+/g, ' ').trim() }))
+      .filter(a => /guild_dungeon_location\.php/i.test(a.url) && !seen.has(a.url) && seen.add(a.url));
+    if (!locLinks.length) {
+      log('⚠ no locations found on this instance page — open a single location and scan that', '#f66');
+      renderSettings();
+      return;
+    }
+    let totalTypes = 0, totalMons = 0;
+    for (const L of locLinks) {
+      const label = L.text.replace(/\s*[—\-|·].*$/, '').trim() || pageLabel(L.url);
+      const { list, mons } = await scanDungeonLocation(L.url, null, label);
+      totalTypes += list.length; totalMons += mons.length;
+    }
+    save();
+    log(`🏰 instance: ${locLinks.length} locations · ${totalTypes} monster types (${totalMons} instances) — tick the ones to farm, set damage, press 💾`, '#9060ff');
+    renderSettings();
+    return;
+  }
+
+  // ── GUILD DUNGEON CUBE page: guild_dungeon_cube.php?instance_id=… ──
+  // The "cube" dungeon is a node-based UI shell: its sections do NOT appear as plain links in
+  // the DOM (Enter is resolved server-side). But every farmable section is a normal
+  // guild_dungeon_location.php?instance_id=…&location_id=K page. So we PROBE location_id 1..40 for
+  // this instance and keep the ones that actually contain monsters (PvE rooms + the boss room).
+  // Invalid ids return a ~20-byte 4xx and PvP-only rooms have no .mon → both are skipped cheaply.
+  if (pu.pathname.includes('guild_dungeon_cube.php')) {
+    const instId = pu.searchParams.get('instance_id');
+    if (!instId) { log('⚠ cube: missing instance_id in URL', '#f66'); renderSettings(); return; }
+    if (btn) btn.textContent = '⏳';
+    let found = 0, types = 0, mobs = 0;
+    for (let loc = 1; loc <= 40; loc++) {
+      const lurl = `${BASE}/guild_dungeon_location.php?instance_id=${instId}&location_id=${loc}`;
+      const { src, list, mons } = await scanDungeonLocation(lurl, null, null);
+      if (!mons.length) {                       // not a farmable section → drop the empty source
+        const i = S.config.indexOf(src);
+        if (i >= 0 && (!src.targets || !src.targets.length)) S.config.splice(i, 1);
+        delete _scan[src.id];
+        continue;
+      }
+      found++; types += list.length; mobs += mons.length;
+    }
+    save();
+    log(found
+      ? `🏰 cube ${instId}: ${found} farmable sections · ${types} monster types (${mobs} mobs) — tick them, set damage, press 💾`
+      : `⚠ cube ${instId}: no farmable sections found (probed location_id 1–40)`, found ? '#9060ff' : '#f66');
     renderSettings();
     return;
   }
@@ -2436,9 +2563,16 @@ function buildUI() {
     } else if (a === 'tokens') {
       pvpRefreshTokens(true);
     } else if (a === 'export') {
-      const j = JSON.stringify(S.pvp.db, null, 2);
-      console.log(j); try { navigator.clipboard.writeText(j); } catch {}
-      log('⚔ PvP DB → console + clipboard', '#9cf');
+      try {
+        const txt = pvpExportText();
+        const url = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
+        const a2 = document.createElement('a');
+        a2.href = url; a2.download = 'veyra_pvp_' + new Date().toISOString().slice(0, 10) + '.txt';
+        document.body.appendChild(a2); a2.click(); a2.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        try { navigator.clipboard.writeText(txt); } catch {}   // best-effort copy too
+        log('⚔ PvP export → file scaricato: ' + a2.download, '#9cf');
+      } catch (e) { log('⚔ export fallito: ' + e.message, '#f88'); }
     } else if (a === 'survive') {
       S.pvp.survive = !!pb.checked; save();
     }
