@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.48.0
+// @version      1.49.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -140,6 +140,7 @@ const defState = () => ({
   _g5w11FarmMigrated: false, // one-time: add the g5w11 trash-farm target to existing saves
   paused: false,
   minimized: false,        // panel collapsed state — persists across page reloads
+  dockPos: null,           // {left,top} of the minimized dock once dragged — persists
   _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
   // Hit style. OFF (default) = EXACT, minimal-overshoot: every fight composes tiers
   // so it lands within ~1 small hit of the target (no stamina wasted — "danni precisi
@@ -2732,6 +2733,7 @@ function buildUI() {
     background: '#0d0d18', border: '1px solid #3a3a5c', borderRadius: '26px',
     padding: '6px 8px 6px 14px', zIndex: '2147483647',
     boxShadow: '0 4px 22px #000b', fontFamily: 'monospace',
+    cursor: 'grab', touchAction: 'none',   // draggable on PC + mobile (Pointer Events)
   });
   dockEl.innerHTML = `
     <span id="vfb-dock-logo" style="cursor:pointer;display:flex;align-items:center;gap:7px;user-select:none">
@@ -2742,6 +2744,44 @@ function buildUI() {
       style="border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;
       font-size:16px;line-height:38px;text-align:center;padding:0">▶</button>`;
   document.body.appendChild(dockEl);
+
+  // Drag the minimized dock anywhere — PC (mouse) AND mobile (touch) via Pointer Events.
+  // A small movement threshold distinguishes a DRAG (reposition) from a TAP (logo→expand,
+  // ⏯→pause), so dragging never accidentally opens the panel or toggles the bot. The
+  // position persists in S.dockPos. (user: "quando minimizzato devo poterlo spostare".)
+  let dockDrag = null, dockMoved = false;
+  const applyDockPos = (left, top) => {
+    const w = dockEl.offsetWidth || 120, h = dockEl.offsetHeight || 50;
+    left = Math.max(0, Math.min(window.innerWidth  - w, left));
+    top  = Math.max(0, Math.min(window.innerHeight - h, top));
+    Object.assign(dockEl.style, { left: left+'px', top: top+'px', right: 'auto', bottom: 'auto', transform: 'none' });
+  };
+  if (S.dockPos && S.dockPos.left != null) applyDockPos(S.dockPos.left, S.dockPos.top);
+  dockEl.addEventListener('pointerdown', e => {
+    const r = dockEl.getBoundingClientRect();
+    dockDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY };
+    dockMoved = false;
+    try { dockEl.setPointerCapture(e.pointerId); } catch {}
+  });
+  dockEl.addEventListener('pointermove', e => {
+    if (!dockDrag) return;
+    if (!dockMoved && Math.hypot(e.clientX - dockDrag.sx, e.clientY - dockDrag.sy) < 6) return;
+    dockMoved = true;
+    dockEl.style.cursor = 'grabbing';
+    e.preventDefault();
+    applyDockPos(e.clientX - dockDrag.dx, e.clientY - dockDrag.dy);
+  });
+  const endDockDrag = () => {
+    if (!dockDrag) return;
+    dockDrag = null;
+    dockEl.style.cursor = 'grab';
+    if (dockMoved) {
+      const r = dockEl.getBoundingClientRect();
+      S.dockPos = { left: Math.round(r.left), top: Math.round(r.top) }; save();
+    }
+  };
+  dockEl.addEventListener('pointerup', endDockDrag);
+  dockEl.addEventListener('pointercancel', endDockDrag);
 
   // Delegated click handler for buttons INSIDE the status tab. The status tab is
   // re-rendered every 2s via innerHTML, so a per-button onclick wouldn't survive —
@@ -2843,8 +2883,9 @@ function buildUI() {
     if (!minimized) renderUI();   // refresh content that went stale while docked
     syncDock();
   }
-  document.getElementById('vfb-dock-logo').onclick = () => setMinimized(false);
-  document.getElementById('vfb-dock-pp').onclick   = e => { e.stopPropagation(); setPaused(!paused); };
+  // ignore the click that fires right after a drag (dockMoved is reset on next pointerdown)
+  document.getElementById('vfb-dock-logo').onclick = () => { if (!dockMoved) setMinimized(false); };
+  document.getElementById('vfb-dock-pp').onclick   = e => { e.stopPropagation(); if (!dockMoved) setPaused(!paused); };
 
   // 🗑 reset the TOP counters — SINGLE click (user: "si dovrebbe clickare una sola
   // volta", the old two-click ✓? was confusing). Keeps S.kills (per-mob farm progress
@@ -2921,7 +2962,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.48.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.49.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
