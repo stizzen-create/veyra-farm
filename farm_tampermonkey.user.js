@@ -2765,7 +2765,7 @@ function buildUI() {
     const r = dockEl.getBoundingClientRect();
     // remember WHAT was pressed: pointer capture (below) steals the synthetic `click`
     // from the child elements, so we resolve the tap here in pointerup instead.
-    dockDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY, tgt: e.target };
+    dockDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY, tgt: e.target, pid: e.pointerId };
     dockMoved = false;
     try { dockEl.setPointerCapture(e.pointerId); } catch {}
   });
@@ -2777,9 +2777,13 @@ function buildUI() {
     e.preventDefault();
     applyDockPos(e.clientX - dockDrag.dx, e.clientY - dockDrag.dy);
   });
-  const endDockDrag = () => {
+  const endDockDrag = e => {
     if (!dockDrag) return;
     const tgt = dockDrag.tgt;
+    // explicit release — on some webviews a missed releasePointerCapture leaves the
+    // capture "stuck" on this pointerId, so the NEXT tap's events never reach the
+    // dock at all (the symptom: pill taps do nothing, every time).
+    try { dockEl.releasePointerCapture(dockDrag.pid); } catch {}
     dockDrag = null;
     dockEl.style.cursor = 'grab';
     if (dockMoved) {
@@ -2793,6 +2797,19 @@ function buildUI() {
   };
   dockEl.addEventListener('pointerup', endDockDrag);
   dockEl.addEventListener('pointercancel', endDockDrag);
+
+  // FALLBACK: on some mobile browsers / webviews the pointer-capture drag logic above
+  // can silently swallow the gesture (no pointerup ever fires, e.g. after a Pointer
+  // Events quirk or a DOM reflow mid-touch) — the dock then looks "dead", no reaction
+  // on tap. A plain `click` listener is a second, independent path to the same
+  // actions: harmless when the drag path already handled it (no-op double toggle is
+  // avoided by only firing here if no drag/measurable move was registered), and a
+  // safety net when it didn't.
+  dockEl.addEventListener('click', e => {
+    if (dockMoved) return; // a real drag already happened — ignore the trailing click
+    if (e.target.closest('#vfb-dock-pp')) { e.stopPropagation(); setPaused(!paused); return; }
+    if (e.target.closest('#vfb-dock-logo')) { e.stopPropagation(); setMinimized(false); }
+  });
 
   // Delegated click handler for buttons INSIDE the status tab. The status tab is
   // re-rendered every 2s via innerHTML, so a per-button onclick wouldn't survive —
