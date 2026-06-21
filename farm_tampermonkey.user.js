@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.45.0
+// @version      1.46.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -131,6 +131,12 @@ const defState = () => ({
   timedKills: 0, timedBy: {}, lspUses: 0, hpHeals: 0, pos: null, config: null,
   farmSeen: {},            // name → last-seen ts: farm mobs we've encountered, so the
                            // 🎯 Farming tab lists what we farm even before the 1st kill
+  // ── Leveling rate (replaces the old HP readout in the status grid) ─────────────
+  // Baseline fractional level (level + exp/expMax) + its timestamp. The status panel
+  // shows the live average lvl/hour = (currentFracLevel − base) / hoursElapsed. Reset
+  // by the 🗑 stats button so the average restarts fresh; persists across reloads so
+  // the figure is a true running average over the whole session.
+  lvlBaseFrac: null, lvlBaseTs: null,
   _g5w11FarmMigrated: false, // one-time: add the g5w11 trash-farm target to existing saves
   paused: false,
   minimized: false,        // panel collapsed state — persists across page reloads
@@ -335,6 +341,47 @@ function parseHp(html) {
 
 // current HP as a percentage of max (null if max unknown yet)
 function hpPct() { return (userHpMax > 0 && userHp != null) ? (userHp / userHpMax * 100) : null; }
+
+// ── LEVELING RATE ───────────────────────────────────────────────────────────────
+// Read the top bar "LV 4125" + "EXP 84,731,522 / 106,399,325" from any fetched full
+// page (battle/wave/dungeon pages all carry the global header). Turns level+exp into a
+// single monotonic "fractional level" so we can show a live lvl/hour average — this is
+// what replaced the HP readout in the status grid (user: "il conteggio degli hp non mi
+// interessa, sostituiscilo con una media di livelli/ora").
+let userLevel = null, userExp = null, userExpMax = null;
+function parseLevel(html) {
+  const lm = html.match(/\bLV\b[^\d]{0,20}?([\d][\d,]*)/i) || html.match(/\bLevel\b[^\d]{0,20}?([\d][\d,]*)/i);
+  if (lm) { const v = parseInt(lm[1].replace(/,/g, '')); if (Number.isFinite(v)) userLevel = v; }
+  // anchor to the EXP label so we never grab the "X / Y HP" pair by mistake
+  const em = html.match(/\bEXP\b[\s\S]{0,200}?([\d][\d,]+)\s*\/\s*([\d][\d,]+)/i);
+  if (em) {
+    const cur = parseInt(em[1].replace(/,/g, '')), mx = parseInt(em[2].replace(/,/g, ''));
+    if (Number.isFinite(cur)) userExp = cur;
+    if (Number.isFinite(mx) && mx > 0) userExpMax = mx;
+  }
+  noteLevelProgress();
+}
+// level + progress to next level, as one always-increasing number (caps the fraction
+// just under 1 so a full bar never reads as the next whole level before it ticks over)
+function fracLevel() {
+  if (userLevel == null) return null;
+  const f = (userExpMax > 0 && userExp != null) ? Math.min(userExp / userExpMax, 0.999) : 0;
+  return userLevel + f;
+}
+// set the baseline the first time we get a reading (after start / after a stats reset)
+function noteLevelProgress() {
+  const f = fracLevel();
+  if (f == null) return;
+  if (S.lvlBaseFrac == null || !S.lvlBaseTs) { S.lvlBaseFrac = f; S.lvlBaseTs = Date.now(); save(); }
+}
+// live average levels gained per hour since the baseline (null until enough time/data)
+function lvlPerHour() {
+  const f = fracLevel();
+  if (f == null || S.lvlBaseFrac == null || !S.lvlBaseTs) return null;
+  const hrs = (Date.now() - S.lvlBaseTs) / 3600000;
+  if (hrs < 1 / 120) return null;   // <30s elapsed → too noisy to be meaningful yet
+  return Math.max(0, (f - S.lvlBaseFrac) / hrs);
+}
 
 // Should we spend an HP potion right now? Threshold is user-chosen (S.hpHealPct, the
 // slider in ⚙ Setup): 0 = OFF (never auto-heal). Otherwise heal when HP% ≤ threshold.
@@ -601,6 +648,7 @@ async function fetchWave(url, needDead = false) {
   const html = await getHtml(url);
   parseStam(html);
   parseHp(html);                   // live HP + max (for the % auto-heal threshold)
+  parseLevel(html);                // LV + EXP → live lvl/hour figure in the status grid
   parseAutoSummon(html);           // boss timers
   const mobs = parseMobs(html);    // alive cards
 
@@ -1864,9 +1912,10 @@ function renderStatus() {
       ${stat('👑', S.timedKills.toLocaleString(), 'boss kills', '#f90')}
       ${stat('🧪', potStock, 'pots left' + (potNone ? ' ⚠' : ''), potNone ? '#f66' : '#cfe')}
       ${stat('❤️', S.hpHeals.toLocaleString(), 'heals' + (hpEmpty ? ' (0!)' : ''), hpEmpty ? '#f66' : '#cfe')}
-      ${stat('🩸', userHp == null ? '—' : (hpPct() != null ? `${Math.round(hpPct())}%` : fmtDmg(userHp)),
-             'HP' + (S.hpHealPct > 0 ? ` (heal ≤${S.hpHealPct}%)` : ' (heal OFF)'),
-             hpPct() != null && hpPct() <= (S.hpHealPct || 0) ? '#f66' : '#cfe')}
+      ${(() => { const lph = lvlPerHour();
+         return stat('📈', lph == null ? '—' : lph.toFixed(lph >= 10 ? 0 : 1),
+                     'lvl/hr' + (userLevel != null ? ` · LV${userLevel.toLocaleString()}` : ''),
+                     '#bda4ff'); })()}
     </div>
     <div style="color:${sc};font-size:12px;margin:2px 0 8px;overflow:hidden;
       text-overflow:ellipsis;white-space:nowrap">${paused ? '⏸ PAUSED' : '▶ '}${esc(status)}</div>
@@ -2505,7 +2554,9 @@ function resetStats() {
   S.timedKills = 0; S.timedBy = {};
   S.hpHeals    = 0; S.lspUses = 0; S.attacks = 0;
   S.questTaken = 0; S.questDone = 0;
+  S.lvlBaseFrac = null; S.lvlBaseTs = null;   // re-baseline the lvl/hour average
   save();
+  noteLevelProgress();   // immediately re-seed from the current reading if we have one
   log('🗑 statistiche superiori azzerate (mob farmati mantenuti)', '#9cf');
   renderUI();
 }
@@ -2524,6 +2575,23 @@ function resetFarm() {
 
 // ── BUILD PANEL ───────────────────────────────────────────────────────────────
 function buildUI() {
+  // one-off stylesheet: animated rainbow "UANM" branding (header + minimized dock)
+  if (!document.getElementById('vfb-style')) {
+    const st = document.createElement('style');
+    st.id = 'vfb-style';
+    st.textContent = `
+      @keyframes vfbRainbow { to { background-position: 200% center; } }
+      .vfb-rainbow {
+        font-weight: 900; letter-spacing: .5px;
+        background: linear-gradient(90deg,#ff004c,#ff8a00,#ffe600,#37e36b,#22b8ff,#a64bff,#ff004c);
+        background-size: 200% auto;
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; color: transparent;
+        animation: vfbRainbow 3s linear infinite;
+      }`;
+    document.head.appendChild(st);
+  }
+
   uiPanel = document.createElement('div');
   Object.assign(uiPanel.style, {
     position: 'fixed', bottom: '8px', right: '8px',
@@ -2544,7 +2612,7 @@ function buildUI() {
     borderRadius: '10px 10px 0 0', cursor: 'grab',
   });
   hdr.innerHTML = `
-    <span style="color:#9060ff;font-weight:bold;font-size:12px">⚔ Veyra Farm <span style="color:#667;font-weight:normal;font-size:10px">by UANM</span></span>
+    <span style="color:#9060ff;font-weight:bold;font-size:12px">⚔ Veyra Farm <span style="font-weight:normal;font-size:11px;color:#778">by </span><span class="vfb-rainbow" style="font-size:12px">UANM</span></span>
     <span style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
       <button id="vfb-tab-s" style="background:#9060ff;color:#fff;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">Status</button>
@@ -2577,6 +2645,30 @@ function buildUI() {
 
   uiPanel.append(hdr, uiContent);
   document.body.appendChild(uiPanel);
+
+  // ── MINIMIZED DOCK ────────────────────────────────────────────────────────────
+  // When collapsed, the whole panel is hidden and this compact pill docks at the
+  // bottom of the screen (fixed, centered — easy to reach with a thumb on mobile,
+  // no fiddly dragging). Tap the ⚔UANM logo to reopen the panel; tap the round
+  // play/pause button to run or pause the bot without opening anything.
+  const dockEl = document.createElement('div');
+  Object.assign(dockEl.style, {
+    position: 'fixed', bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))',
+    left: '50%', transform: 'translateX(-50%)',
+    display: 'none', alignItems: 'center', gap: '10px',
+    background: '#0d0d18', border: '1px solid #3a3a5c', borderRadius: '26px',
+    padding: '6px 8px 6px 14px', zIndex: '2147483647',
+    boxShadow: '0 4px 22px #000b', fontFamily: 'monospace',
+  });
+  dockEl.innerHTML = `
+    <span id="vfb-dock-logo" style="cursor:pointer;display:flex;align-items:center;gap:7px;user-select:none">
+      <span style="color:#9060ff;font-weight:bold;font-size:15px">⚔</span>
+      <span class="vfb-rainbow" style="font-size:14px">UANM</span>
+    </span>
+    <button id="vfb-dock-pp" title="run / pause the bot"
+      style="border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;
+      font-size:16px;line-height:38px;text-align:center;padding:0">▶</button>`;
+  document.body.appendChild(dockEl);
 
   // Delegated click handler for buttons INSIDE the status tab. The status tab is
   // re-rendered every 2s via innerHTML, so a per-button onclick wouldn't survive —
@@ -2649,14 +2741,37 @@ function buildUI() {
     setTab(activeTab === 'settings' ? 'status' : 'settings');
   };
 
-  document.getElementById('vfb-p').onclick = e => {
-    e.stopPropagation();
-    paused = !paused;
-    S.paused = paused; save();   // survive page navigation
-    document.getElementById('vfb-p').textContent = paused ? '▶' : '⏸';
+  // keep the dock's play/pause button in step with the live paused state
+  function syncDock() {
+    const b = document.getElementById('vfb-dock-pp');
+    if (!b) return;
+    b.textContent      = paused ? '▶' : '⏸';                 // show the ACTION on tap
+    b.style.background  = paused ? '#16331f' : '#33290f';
+    b.style.color       = paused ? '#39d97f' : '#ffb02e';
+  }
+  // single source of truth for pausing — header button + dock button both call this
+  function setPaused(v) {
+    paused = v; S.paused = paused; save();   // survive page navigation
+    const hp = document.getElementById('vfb-p');
+    if (hp) hp.textContent = paused ? '▶' : '⏸';
+    syncDock();
     renderUI();
-  };
+  }
+  document.getElementById('vfb-p').onclick = e => { e.stopPropagation(); setPaused(!paused); };
   document.getElementById('vfb-p').textContent = paused ? '▶' : '⏸';   // reflect persisted state
+
+  // collapse/expand: hide the whole panel and show the bottom dock instead (or back)
+  function setMinimized(v) {
+    minimized = v; S.minimized = minimized; save();   // stay collapsed across reloads
+    uiPanel.style.display = minimized ? 'none' : 'block';
+    dockEl.style.display  = minimized ? 'flex' : 'none';
+    const mb = document.getElementById('vfb-m');
+    if (mb) mb.textContent = '—';
+    if (!minimized) renderUI();   // refresh content that went stale while docked
+    syncDock();
+  }
+  document.getElementById('vfb-dock-logo').onclick = () => setMinimized(false);
+  document.getElementById('vfb-dock-pp').onclick   = e => { e.stopPropagation(); setPaused(!paused); };
 
   // 🗑 reset the TOP counters — SINGLE click (user: "si dovrebbe clickare una sola
   // volta", the old two-click ✓? was confusing). Keeps S.kills (per-mob farm progress
@@ -2669,16 +2784,10 @@ function buildUI() {
     rbtn.textContent = '✓'; rbtn.style.background = '#2f5040';
     setTimeout(() => { rbtn.textContent = '🗑'; rbtn.style.background = '#252540'; }, 900);
   };
-  document.getElementById('vfb-m').onclick = e => {
-    e.stopPropagation();
-    minimized = !minimized;
-    S.minimized = minimized; save();   // stay collapsed across page reloads
-    uiContent.style.display = minimized ? 'none' : 'block';
-    document.getElementById('vfb-m').textContent = minimized ? '□' : '—';
-  };
+  document.getElementById('vfb-m').onclick = e => { e.stopPropagation(); setMinimized(true); };
   // reflect the persisted collapsed state on load (so a refresh doesn't re-open it)
-  uiContent.style.display = minimized ? 'none' : 'block';
-  document.getElementById('vfb-m').textContent = minimized ? '□' : '—';
+  uiContent.style.display = 'block';
+  setMinimized(minimized);
 
   // drag the panel anywhere (mouse + touch via Pointer Events); position persists
   let drag = null;
@@ -2736,9 +2845,10 @@ document.addEventListener('visibilitychange', () => {
 function init() {
   purgeDomainCookies();   // remove the bad domain= duplicates older versions left
   buildUI();
+  try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.35.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.46.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
