@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.47.0
+// @version      1.48.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -2410,6 +2410,15 @@ function renderSettings() {
           <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
       if (farm) s += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
       if (dgb)  s += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacca da solo appena la stanza apre (~3s, AFK) e si ferma <b>sotto</b> ${esc(fmtDmg(t.dmgTarget))} — mai oltre il limite gilda</div>`;
+      // "match name ⊇" — only attack monsters whose name CONTAINS one of these words.
+      // For a multi-phase boss (Hermes: phase1 "Divine Herald", phase2 "Fleet Duelist",
+      // phase3 "Ascended Herald") type the phase-only word — e.g. "ascended" — so the bot
+      // engages ONLY that phase's card. Comma-separated; empty = match the scanned name.
+      s += `<div style="flex-basis:100%;display:flex;align-items:center;gap:5px;margin-top:4px">
+        <span style="color:#9cf;font-size:10px;white-space:nowrap" title="Attack only monsters whose name contains one of these words (comma-separated). Use a phase-only word like 'ascended' to hit just Hermes phase 3.">match name ⊇</span>
+        <input style="${IN};flex:1;min-width:90px" data-fld="match" data-wi="${wi}" data-name="${esc(name)}" value="${esc((t.include||[]).join(', '))}" placeholder="(any name — careful!)" title="e.g. 'ascended' = only Hermes phase 3. Empty matches EVERY monster on the page.">
+        ${(t.exclude&&t.exclude.length)?`<span style="color:#a88;font-size:9px;white-space:nowrap" title="never these">≠ ${esc(t.exclude.join(', '))}</span>`:''}
+      </div>`;
       s += `</div>`;
     }
     s += `</div>`;
@@ -2536,6 +2545,10 @@ function wireSettings() {
     } else if (f === 'killLimit') {
       const raw = el.value.replace(/[^\d]/g, '');
       t.killLimit = raw === '' ? 1 : Math.max(1, parseInt(raw));
+    } else if (f === 'match') {
+      // edit the include tokens (name-contains filter). Comma-separated, lowercased.
+      // e.g. "ascended" → attack only Hermes phase 3; empty → match every monster.
+      t.include = el.value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     }
     scheduleApply();
   };
@@ -2908,7 +2921,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.47.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.48.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
