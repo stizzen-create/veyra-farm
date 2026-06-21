@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.43.0
+// @version      1.44.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -18,6 +18,11 @@ const BASE       = 'https://demonicscans.org';
 const SKILL_ID   = -1;    // power (default 10-stam hit)
 const SKILL_COST = 10;
 const ATK_GAP    = 1600;  // ms between attacks
+// 🏰 DUNGEON BOSS watch: while a "dungeon boss" target is armed, the main loop + the
+// location page-read run at THIS cadence (instead of 12s cache / 60s idle nap) so the
+// bot notices the boss room opening within ~3s and fires the instant it goes alive —
+// no clock, no button, works AFK. Low enough vs the site rate-limit (retries "Slow down").
+const DUNGEON_BOSS_POLL = 3000;
 // Stamina potions the bot may drink, in PRIORITY order. RULE (user): NEVER touch FSP
 // (item 35, Full Stamina Potion) — only ever spend LSP (251, Large, +5000), and only
 // if needed. FSP is kept untouched, so it's deliberately NOT in this list.
@@ -759,7 +764,7 @@ async function lootMob(idp) {
 const SMALLEST = SKILLS[SKILLS.length - 1];   // 1-stamina Slash
 const PROC_MAX_STAM = 50;                     // proc-farming caps hits at 50 stam (Heroic)
 
-async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null, timer = false) {
+async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null, timer = false, hardCap = false) {
   await join(idp);
   let dmg = startDmg, K = 0, stall = 0, measured = !!knownStart;
   status = `→ ${label}`;
@@ -772,6 +777,14 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return { dmg, reason: 'interrupt' }; }
 
     const remaining = dmgTarget - dmg;
+    // 🏰 HARD CAP (dungeon boss): dmgTarget is a STRICT guild ceiling, not a "stop at".
+    // Once even the smallest hit (1 stam ≈ K dmg) would cross it, STOP here and stay UNDER
+    // — never overshoot the guild's allowed damage. (Normal targets accept a ≤1-hit
+    // overshoot; a dungeon boss must not.) K must be known first (we measure it on hit #2).
+    if (hardCap && K && remaining < K) {
+      log(`🏰 ${label}: cap-safe stop at ${fmtDmg(dmg)} — next hit ≈${fmtDmg(Math.round(K))} would cross cap ${fmtDmg(dmgTarget)}`, '#9cf');
+      return { dmg, reason: 'done' };
+    }
     // potion ONLY when truly out of stamina — never just to afford a bigger tier
     // (that was the "pozione senza motivo"). With some stamina left we use the
     // biggest tier we can already afford.
@@ -974,7 +987,7 @@ async function processWave(wave, targets = null, interruptible = false) {
 
     // quest mobs drink potions unconditionally (must complete the quest); they're
     // farm-type otherwise. `forcePot` makes useLSP/fightTarget treat them like a timed.
-    const forcePot = !!(t.timer || t.quest);
+    const forcePot = !!(t.timer || t.quest || t.dungeonBoss);
 
     for (const mob of alive) {
       if (paused || !running) break;
@@ -1009,7 +1022,7 @@ async function processWave(wave, targets = null, interruptible = false) {
       log(`→ ${mob.name} (${fmtDmg(mob.userdmg)} / ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
       const { dmg, reason } = await fightTarget(
         { monster_id: mob.id }, mob.name, mob.userdmg, t.dmgTarget, t.useLSP, interruptible, true, !!t.exact,
-        t.timer ? null : (() => harvestWaveExp(wave, targets)), forcePot);
+        (t.timer || t.dungeonBoss) ? null : (() => harvestWaveExp(wave, targets)), forcePot, !!t.dungeonBoss);
       if (reason === 'interrupt') return;             // a timed boss respawned → bail to phase 1
       if (dmg >= t.dmgTarget) {
         // quest: this mob is now engaged (≥ minDmg) → count it against `need` so we
@@ -1035,14 +1048,15 @@ async function processDungeon(src) {
   const t = (src.targets || [])[0];
   if (!t || t.enabled === false) return;
   if (stam < 1) {
-    if (t.useLSP) await useLSP(t.timer);
+    if (t.useLSP) await useLSP(t.timer || t.dungeonBoss);
     if (stam < 1) { log(`no stamina — skip dungeon ${src.label}`, '#fa0'); return; }
   }
   const idp = { dgmid: src.dgmid, instance_id: src.instance_id };
   log(`→ 🏰 dungeon ${src.label} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
   // startDmg 0 + knownStart=false → fightTarget learns K on hit #2 (we don't know
   // our prior cumulative damage on this boss; totaldmgdealt gives the real total).
-  const { dmg, reason } = await fightTarget(idp, src.label, 0, t.dmgTarget, t.useLSP, false, false, false, null, t.timer);
+  // dungeonBoss → drink unconditionally (timer-like) + hard cap (stay under guild limit).
+  const { dmg, reason } = await fightTarget(idp, src.label, 0, t.dmgTarget, t.useLSP, false, false, !!t.dungeonBoss, null, t.timer || t.dungeonBoss, !!t.dungeonBoss);
   if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
     const r = await lootMob(idp);
     log(`${reason === 'dead' ? '☠️' : '✓'} dungeon ${src.label} — ${fmtDmg(dmg)}${r ? ' · loot ✓' : ''}`, '#2f8');
@@ -1059,13 +1073,17 @@ async function processDungeonLocation(src) {
   const targets = (src.targets || []).filter(t => t.enabled !== false);
   if (!targets.length) return;
 
-  // throttle the page read (12s): when everything is dead this would otherwise re-fetch
+  // throttle the page read: when everything is dead this would otherwise re-fetch
   // ~twice a second (the main loop only sleeps 600ms while stamina is left) and hammer
   // the server. While cached we just skip the pass.
+  //   • normal targets        → 12s (gentle, the room isn't time-critical)
+  //   • 🏰 dungeon boss armed  → DUNGEON_BOSS_POLL (~3s) so we SEE the room open fast
+  const hasBoss   = targets.some(t => t.dungeonBoss);
+  const readEvery = hasBoss ? DUNGEON_BOSS_POLL : 12_000;
   const now = Date.now();
   const hit = _dlCache[src.id];
   let mons;
-  if (hit && now - hit.ts < 12_000) {
+  if (hit && now - hit.ts < readEvery) {
     mons = hit.mons;
   } else {
     status = `fetch 🏰 ${src.label}…`; renderUI();
@@ -1104,12 +1122,13 @@ async function processDungeonLocation(src) {
     for (const m of alive) {
       if (paused || !running) break;
       if (stam < 1) {
-        if (t.useLSP) await useLSP(t.timer);
+        if (t.useLSP) await useLSP(t.timer || t.dungeonBoss);
         if (stam < 1) { log(`no stamina — stop 🏰 ${t.key}`, '#fa0'); return; }
       }
       log(`→ 🏰 ${m.name} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
       const idp = { dgmid: m.dgmid, instance_id: m.instance_id };
-      const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact, null, t.timer);
+      // dungeonBoss → exact tiers + drink unconditionally + HARD CAP (never cross the guild limit).
+      const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact || !!t.dungeonBoss, null, t.timer || t.dungeonBoss, !!t.dungeonBoss);
       if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
         const r = await lootMob(idp);
         _dlLooted.add(m.dgmid);
@@ -1784,7 +1803,12 @@ async function mainLoop() {
     // usano pozioni, i timed sono già al target). Dormi a lungo invece di rifare
     // il giro ~2 volte al secondo spammando il log. Il cache wave (30s) scade nel
     // frattempo, così al risveglio rilegge stamina/boss freschi.
-    await sleep(stam < SKILL_COST ? 60_000 : 600);
+    // ECCEZIONE 🏰: se è armato un "dungeon boss", NON dormire 60s anche a stamina 0 —
+    // la stanza può aprirsi da un momento all'altro (la gilda finisce le lanes) e il boss
+    // beve LSP appena lo vede. Resta sveglio a ~3s così lo aggancia all'istante (AFK-safe).
+    const bossWatch = (S.config || []).some(s => s.enabled !== false &&
+      (s.targets || []).some(t => t.enabled !== false && t.dungeonBoss));
+    await sleep(bossWatch ? DUNGEON_BOSS_POLL : (stam < SKILL_COST ? 60_000 : 600));
   }
 }
 
@@ -2325,17 +2349,25 @@ function renderSettings() {
           ${on?`<button data-action="deltarget" data-wi="${wi}" data-name="${esc(r.name)}" title="remove target" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:1px 7px;cursor:pointer;font:12px monospace">✕</button>`:''}
         </div>`;
       if (on) {
-        const farm = !t.timer;
+        const mode = t.dungeonBoss ? 'dungeonboss' : (t.timer ? 'timed' : 'farm');
+        const farm = mode === 'farm';
+        const dgb  = mode === 'dungeonboss';
         h += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-left:22px">
-          <span style="color:#9cf;font-size:10px">stop at</span>
-          <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="stop attacking once you've dealt this much damage">
+          <span style="color:#9cf;font-size:10px">${dgb ? 'max dmg' : 'stop at'}</span>
+          <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="${dgb ? 'GUILD CAP — the bot stops STRICTLY under this much damage (never crosses it)' : "stop attacking once you've dealt this much damage"}">
           <label style="color:#fab;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Timed boss: fight to the damage target, then move on (may use potions)">
-            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="timed" ${t.timer?'checked':''}> ⏰ Timed
+            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="timed" ${mode==='timed'?'checked':''}> ⏰ Timed
+          </label>
+          <label style="color:#c9a0ff;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Dungeon boss: auto-detects the room opening (polls ~3s, AFK), drinks a potion the instant the boss appears, and stops STRICTLY UNDER the damage cap above — never overshoots the guild limit">
+            <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="dungeonboss" ${dgb?'checked':''}> 🏰 Dungeon Boss
           </label>
           <label style="color:#7df;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Farm: kill regular monsters (no potions)">
             <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(r.name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
         if (farm) {
           h += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(r.name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
+        }
+        if (dgb) {
+          h += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacca da solo appena la stanza apre (~3s, AFK) e si ferma <b>sotto</b> ${esc(fmtDmg(t.dmgTarget))} — mai oltre il limite gilda</div>`;
         }
         h += `</div>`;
       }
@@ -2415,8 +2447,9 @@ function wireSettings() {
       scheduleApply(); renderSettings();
     } else if (a === 'mode') {
       const t = targetFor(w, nm); if (!t) return;
-      if (el.value === 'timed') { t.timer = true;  t.killLimit = null;            t.useLSP = 'asNeeded'; }
-      else                      { t.timer = false; t.killLimit = t.killLimit || 400; t.useLSP = 'asNeeded'; }
+      if (el.value === 'timed')             { t.timer = true;  t.dungeonBoss = false; t.killLimit = null;             t.useLSP = 'asNeeded'; }
+      else if (el.value === 'dungeonboss')  { t.timer = false; t.dungeonBoss = true;  t.killLimit = null;             t.useLSP = 'asNeeded'; }
+      else                                  { t.timer = false; t.dungeonBoss = false; t.killLimit = t.killLimit || 400; t.useLSP = 'asNeeded'; }
       scheduleApply(); renderSettings();
     }
   };
