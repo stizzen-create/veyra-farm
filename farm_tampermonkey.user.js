@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.49.0
+// @version      1.50.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -816,7 +816,7 @@ const PROC_MAX_STAM = 50;                     // proc-farming caps hits at 50 st
 async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null, timer = false, hardCap = false) {
   await join(idp);
   let dmg = startDmg, K = 0, stall = 0, measured = !!knownStart;
-  status = `→ ${label}`;
+  status = `→ ${shortName(label)}`;
 
   while (dmg < dmgTarget && !paused && running) {
     // dead with auto-heal OFF → don't burn an HP potion: bail out quietly and let the
@@ -898,7 +898,8 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
       log(`⛔ ${label}: damage stuck at ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} (cap or undamageable) → moving on`, '#fa0');
       return { dmg, reason: 'cap' };
     }
-    status = `→ ${label} ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} ${stam}⚡`;
+    // numbers FIRST so the long monster name (truncated) can't push them out of view
+    status = `${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} ${stam}⚡ · ${shortName(label)}`;
     renderUI();
   }
   return { dmg, reason: 'done' };
@@ -1887,6 +1888,9 @@ function bar(n, max, w = 14) {
   return '█'.repeat(f) + '░'.repeat(w - f);
 }
 
+// Trim a long monster name so it can't push the dmg/stamina off the status line.
+function shortName(n, max = 20) { n = String(n || ''); return n.length > max ? n.slice(0, max) + '…' : n; }
+
 // ── RENDER ────────────────────────────────────────────────────────────────────
 let uiContent, uiPanel, minimized = S.minimized === true, activeTab = 'status';
 
@@ -2738,7 +2742,7 @@ function buildUI() {
   dockEl.innerHTML = `
     <span id="vfb-dock-logo" style="cursor:pointer;display:flex;align-items:center;gap:7px;user-select:none">
       <span style="color:#9060ff;font-weight:bold;font-size:15px">⚔</span>
-      <span class="vfb-rainbow" style="font-size:14px">UANM</span>
+      <span class="vfb-rainbow" style="font-size:14px">autouanm</span>
     </span>
     <button id="vfb-dock-pp" title="run / pause the bot"
       style="border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;
@@ -2962,7 +2966,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.49.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.50.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
