@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.58.0
+// @version      1.59.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -169,6 +169,14 @@ const defState = () => ({
   // Default 10% = cura solo quando sei quasi morto (prima curava SEMPRE alla morte
   // e l'utente lo trovava troppo aggressivo → ora si sceglie con lo slider).
   hpHealPct: 10,
+  // ── Mana potions (per classi a mana: Mago/Hunter/ecc., NON il Berserker) ──────
+  // Io (UANM) gioco Berserker → uso Rage, niente mana. Ma le classi a mana spendono MP
+  // per le skill: questo controllo dice se e quante pozioni di mana bere quando l'MP è
+  // basso. DISABILITATO di default. Il CONSUMO vero si aggancia con l'AutoPvP adattivo
+  // (rileva la classe) — vedi useMana(). Mana Potion L (item 163, +200) poi S (162, +20).
+  manaEnabled: false,   // checkbox Setup (default OFF)
+  manaPots: 3,          // quante pozioni di mana usare (budget) quando abilitato
+  manaUsed: 0,          // contatore sessione
   // ── Adventurer's Guild quests (auto accept → farm g5w9 → finish → next) ──
   // ON = il bot accetta una quest disponibile (fuori cooldown), farma il suo mob
   // su g5w9 fino al target del server, la consegna e prende la successiva.
@@ -1467,7 +1475,8 @@ const _pvpSeen = {};   // mid:logId → 1 (dedup tra i poll)
 // statistiche del match CORRENTE (per diagnosticare PERCHÉ vinci/perdi). Si azzerano a ogni
 // nuovo match (mid diverso). myDmg = danno che faccio, enemyDmg = danno che subisco,
 // enemyHeal = quanto si cura il nemico, enemyBig = il suo colpo più forte su di me.
-let _pvpMatchStats = { mid: null, myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0 };
+// myTokens/enemyTokens = somma dei costi-token delle skill usate nel match (da d.skill.cost).
+let _pvpMatchStats = { mid: null, myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0, myTokens: 0, enemyTokens: 0 };
 // classifica una classe dai dati IMPARATI: curatore (si cura tanto / ha skill di cura) e/o
 // nuker (colpo singolo molto forte). Guida la strategia in pvpPick.
 function pvpProfile(cls) {
@@ -1485,7 +1494,7 @@ function pvpLearn(mid, state, logs, rageBefore) {
   const db = S.pvp.db;
   const enemyU = Object.values(state.teams?.enemy?.players_by_num || {})[0];
   const cls = enemyU?.advanced_class_name || 'Unknown';
-  if (_pvpMatchStats.mid !== mid) _pvpMatchStats = { mid, myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0 };
+  if (_pvpMatchStats.mid !== mid) _pvpMatchStats = { mid, myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0, myTokens: 0, enemyTokens: 0 };
   for (const l of (logs || [])) {
     const key = mid + ':' + l.id; if (_pvpSeen[key]) continue; _pvpSeen[key] = 1;
     const d = l.details; if (!d || !d.skill) continue;
@@ -1497,6 +1506,7 @@ function pvpLearn(mid, state, logs, rageBefore) {
       m.id = d.skill.id;
       if (dmg > m.maxDmg) m.maxDmg = dmg;
       if (dmg > 0) _pvpMatchStats.myDmg += dmg;
+      _pvpMatchStats.myTokens += (d.skill.cost || 0);   // token spesi da me (per il report)
       const bucket = (rageBefore != null && rageBefore >= 100) ? 'full' : 'partial';
       const b = m.byRage[bucket] = m.byRage[bucket] || { maxDmg: 0, note: '' };
       if (dmg > b.maxDmg) b.maxDmg = dmg;
@@ -1506,6 +1516,7 @@ function pvpLearn(mid, state, logs, rageBefore) {
     } else {
       const C = db.classes[cls] = db.classes[cls] || { class: cls, resource: enemyU?.advanced_resource_name, skills: {}, effects: {}, notes: {}, matches: 0, losses: 0, dmgToMe: 0, healed: 0, bigHit: { dmg: 0, skill: '' } };
       const sk = C.skills[d.skill.name] = C.skills[d.skill.name] || { id: d.skill.id, cost: d.skill.cost, maxDmg: 0, retaliationToMe: 0 };
+      _pvpMatchStats.enemyTokens += (d.skill.cost || 0);   // token spesi dal nemico (visibili → report)
       if (dmg  > sk.maxDmg)          sk.maxDmg = dmg;
       if (self > sk.retaliationToMe) sk.retaliationToMe = self;
       if (d.formula?.attack_notes)  C.notes.attack  = d.formula.attack_notes;
@@ -1674,7 +1685,7 @@ function pvpEndMatch(state) {
   const cls = enemyU?.advanced_class_name || 'Unknown';
   const win = state.match?.winner_side === 'ally';
   // DIAGNOSI: perché ho vinto/perso, dalle statistiche del match (mydmg vs danno subito vs cure).
-  const st = (_pvpMatchStats.mid === S.pvp.cur) ? _pvpMatchStats : { myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0 };
+  const st = (_pvpMatchStats.mid === S.pvp.cur) ? _pvpMatchStats : { myDmg: 0, enemyDmg: 0, enemyHeal: 0, enemyBig: 0, myTokens: 0, enemyTokens: 0 };
   let reason;
   if (win) reason = 'won';
   else if (st.enemyHeal > st.myDmg * 0.45) reason = 'out-healed';      // si è curato troppo
@@ -1682,7 +1693,7 @@ function pvpEndMatch(state) {
   else if (st.enemyDmg > st.myDmg)         reason = 'out-damaged';     // più DPS di me
   else reason = 'close';
   S.pvp.matches.push({ mid: S.pvp.cur, enemyClass: cls, winner: state.match?.winner_side, reason,
-    myDmg: st.myDmg, enemyDmg: st.enemyDmg, enemyHeal: st.enemyHeal });
+    myDmg: st.myDmg, enemyDmg: st.enemyDmg, enemyHeal: st.enemyHeal, myTokens: st.myTokens, enemyTokens: st.enemyTokens });
   if (S.pvp.matches.length > 200) S.pvp.matches.shift();
   if (win) S.pvp.wins++; else S.pvp.losses++;
   const C = S.pvp.db.classes[cls];
@@ -1692,7 +1703,7 @@ function pvpEndMatch(state) {
   }
   S.pvp.cur = null; _pvpUrlConsumed = true; save();
   const prof = pvpProfile(cls);
-  log(`⚔ PvP ${win ? 'WIN' : 'LOSS'} vs ${cls}${prof.healer ? ' (healer)' : ''}${prof.bursty ? ' (nuker)' : ''} · ${reason} · myDmg ${fmtDmg(st.myDmg)} / theirHeal ${fmtDmg(st.enemyHeal)} / theirBig ${fmtDmg(st.enemyBig)} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
+  log(`⚔ PvP ${win ? 'WIN' : 'LOSS'} vs ${cls}${prof.healer ? ' (healer)' : ''}${prof.bursty ? ' (nuker)' : ''} · ${reason} · myDmg ${fmtDmg(st.myDmg)} / theirHeal ${fmtDmg(st.enemyHeal)} / theirBig ${fmtDmg(st.enemyBig)} · 🎟 tokens me ${st.myTokens||0} / enemy ${st.enemyTokens||0} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
 }
 
 // build a HUMAN-READABLE .txt report (per-class W/L + loss reasons + their big hit),
@@ -1706,6 +1717,13 @@ function pvpExportText() {
     + (tot ? '  (' + Math.round((p.wins || 0) / tot * 100) + '%)' : ''));
   L.push('');
   L.push('PER-CLASS (worst winrate first):');
+  // media token spesi (miei/nemici) per classe, dai match registrati
+  const tokAgg = {};
+  for (const mm of (p.matches || [])) {
+    if (mm.myTokens == null && mm.enemyTokens == null) continue;
+    const a = tokAgg[mm.enemyClass] = tokAgg[mm.enemyClass] || { n: 0, my: 0, en: 0 };
+    a.n++; a.my += (mm.myTokens || 0); a.en += (mm.enemyTokens || 0);
+  }
   const rows = Object.values(db.classes || {}).map(C => {
     const m = C.matches || 0, l = C.losses || 0, w = m - l;
     return { C, m, l, w, wr: m ? Math.round(w / m * 100) : 0 };
@@ -1714,9 +1732,11 @@ function pvpExportText() {
     const C = r.C;
     const big = C.bigHit ? (C.bigHit.skill + ' ' + (C.bigHit.dmg || 0).toLocaleString()) : '—';
     const lr  = C.lossReasons ? Object.entries(C.lossReasons).map(([k, v]) => k + '×' + v).join(', ') : '';
+    const ta  = tokAgg[C.class];
+    const tok = ta && ta.n ? '  · 🎟 avg me ' + Math.round(ta.my / ta.n) + ' / enemy ' + Math.round(ta.en / ta.n) : '';
     L.push('  ' + String(C.class || '?').padEnd(14)
       + (r.w + 'W/' + r.l + 'L').padEnd(8) + String(r.wr + '%').padStart(4)
-      + '  · big hit: ' + big + (lr ? '  · losses: ' + lr : ''));
+      + '  · big hit: ' + big + tok + (lr ? '  · losses: ' + lr : ''));
   }
   L.push('');
   L.push('=== RAW DATA (JSON, for analysis) ===');
@@ -2449,6 +2469,25 @@ function renderSettings() {
       <div id="vfb-hp-desc" style="color:#667;font-size:10px">${hpDesc}</div>
     </div>`;
 
+  // ── Mana potions (mana-using classes only — Mage/Hunter/etc., NOT Berserker) ──
+  // Checkbox enable (default OFF) + slider for how many mana potions to use.
+  const mOn = !!S.manaEnabled, mN = S.manaPots | 0;
+  h += `
+    <div style="background:#10101c;border:1px solid ${mOn?'#2a3a5a':'#3a3144'};border-radius:6px;padding:8px;margin-bottom:6px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer">
+        <input type="checkbox" data-act="manaenable" ${mOn?'checked':''} style="transform:scale(1.2)">
+        <span style="flex:1;color:#dfe6ff">🔵 Mana potions <span style="color:#667;font-size:10px">(mana classes: Mage/Hunter — not Berserker)</span></span>
+        <span style="color:${mOn?'#6cf':'#777'};font-weight:bold;font-size:11px">${mOn?'ON':'OFF'}</span>
+      </label>
+      <div style="display:flex;align-items:center;gap:8px;font-size:11px;margin-top:7px;opacity:${mOn?'1':'.45'}">
+        <span style="flex:1;color:#dfe6ff">How many to use</span>
+        <span id="vfb-mana-val" style="font-weight:bold;color:#6cf">${mN}</span>
+      </div>
+      <input type="range" min="0" max="20" step="1" value="${mN}" data-act="manapots" ${mOn?'':'disabled'}
+        style="width:100%;margin:7px 0 3px;accent-color:#39f;cursor:pointer;opacity:${mOn?'1':'.45'}">
+      <div style="color:#667;font-size:10px">${mOn?`Drinks up to ${mN} mana potion(s) when MP runs low (L item 163, then S 162). Wiring activates with adaptive class detection.`:'OFF — never spends mana potions'}</div>
+    </div>`;
+
   h += sectionTitle('Targets — what to attack');
   h += `
     <div style="display:flex;gap:6px;margin-bottom:6px;position:sticky;top:-8px;
@@ -2630,6 +2669,13 @@ function wireSettings() {
         : `Drinks an HP potion when your HP drops to ${v}% or below`;
       return;
     }
+    // 🔵 mana potions count slider — update live
+    if (el.dataset.act === 'manapots') {
+      S.manaPots = Math.max(0, Math.min(20, parseInt(el.value) || 0)); save();
+      const vEl = document.getElementById('vfb-mana-val');
+      if (vEl) vEl.textContent = S.manaPots;
+      return;
+    }
     const f = el.dataset.fld; if (!f) return;
     const w = wave(el.dataset.wi); if (!w) return;
     if (f === 'label') { w.label = el.value; scheduleApply(); return; }
@@ -2653,6 +2699,7 @@ function wireSettings() {
     if (a === 'smallhits')  { S.smallHits   = el.checked; save(); renderSettings(); return; }
     if (a === 'lspenable')  { S.lspEnabled  = el.checked; save(); renderSettings(); return; }
     if (a === 'questenable'){ S.questEnabled= el.checked; save(); renderSettings(); return; }
+    if (a === 'manaenable') { S.manaEnabled = el.checked; save(); renderSettings(); return; }
     const w = wave(el.dataset.wi); if (!w) return;
     const nm = el.dataset.name;
     if (a === 'wave-enable') {
@@ -3062,7 +3109,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.58.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.59.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
