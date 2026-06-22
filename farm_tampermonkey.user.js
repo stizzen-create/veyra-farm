@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.59.0
+// @version      1.60.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -175,7 +175,7 @@ const defState = () => ({
   // basso. DISABILITATO di default. Il CONSUMO vero si aggancia con l'AutoPvP adattivo
   // (rileva la classe) — vedi useMana(). Mana Potion L (item 163, +200) poi S (162, +20).
   manaEnabled: false,   // checkbox Setup (default OFF)
-  manaPots: 3,          // quante pozioni di mana usare (budget) quando abilitato
+  manaPots: 500,        // quante pozioni di mana usare (budget) quando abilitato (slider 0–4000)
   manaUsed: 0,          // contatore sessione
   // ── Adventurer's Guild quests (auto accept → farm g5w9 → finish → next) ──
   // ON = il bot accetta una quest disponibile (fuori cooldown), farma il suo mob
@@ -718,6 +718,10 @@ async function fetchWave(url, needDead = false) {
 // is alive and still needs damage. Throttled so it never spams the server.
 let _lastTimedCheck = 0;
 let _timedInterrupt = false;
+// true se in QUESTO giro del mainLoop ho fatto qualcosa di reale (un colpo o un loot). Se a fine
+// giro è ancora false e ho stamina, vuol dire "giro a vuoto" (target tutti al cap / niente da
+// lootare) → mostro "in attesa" e dormo a lungo invece di scorrere le wave (fetch g5w11…) ogni 600ms.
+let _didWork = false;
 const TIMED_CHECK_INTERVAL = 25_000;
 
 async function anyTimedReady() {
@@ -839,7 +843,8 @@ async function lootMob(idp) {
   const d = isDungeon(idp)
     ? await post('dungeon_loot.php', { dgmid: idp.dgmid, instance_id: idp.instance_id, user_id: uid() })
     : await post('loot.php', { monster_id: idp.monster_id, user_id: uid() });
-  return d?.status === 'success' ? (d.rewards ?? {}) : null;
+  if (d?.status === 'success') { _didWork = true; return d.rewards ?? {}; }   // un loot = lavoro reale
+  return null;
 }
 
 // ── EXACT-DAMAGE FIGHT (shared by waves + dungeons) ────────────────────────────
@@ -917,6 +922,7 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     const res = await attack(idp, tier.id, tier.stam);
     if (!res) continue;
     S.attacks++;
+    _didWork = true;                                // ho davvero attaccato → non è un giro a vuoto
     const msg = res.message || '';
     if (msg.includes('Monster is already dead')) { log(`${label} already dead`, '#fa0'); return { dmg, reason: 'dead' }; }
     const nd = parseInt(res.totaldmgdealt || '0');
@@ -1014,7 +1020,8 @@ async function processWave(wave, targets = null, interruptible = false) {
   // lo stato "in attesa" impostato dal mainLoop. I morti vengono comunque lootati
   // (e mostrano cosa si è preso). Vedi richiesta utente: "in attesa → solo waiting".
   const quiet = stam < 1;
-  if (!quiet) { status = `fetch ${wave.id}…`; renderUI(); }
+  // niente più "fetch g5w11…" sullo status (scorreva tutte le wave a vuoto): lo status mostra
+  // solo attività reale (→ mob / danno) o "in attesa". Lo scan resta nel log debug se serve.
   // every target loots its dead instances — farm trash AND timed bosses (a killed
   // boss sits dead until looted). Cache makes this ~1 dead-scan per wave / 30s.
   const needDead = true;
@@ -1898,6 +1905,8 @@ async function mainLoop() {
     // cosa condivisa è la banda di richieste — entrambi i loop gestiscono già il rate-limit
     // ("Slow down" → retry), quindi non serve mettere in pausa il farm durante il PvP.
     if (!invLoaded) { await refreshInv(); invLoaded = true; }
+    _didWork = false;          // azzera: lo rialzano un colpo o un loot (vedi lootMob/fightTarget)
+    let questPending = false;
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
       // Phase 0 — guild dungeon bosses (battle.php?dgmid) — single boss per source
@@ -1914,7 +1923,6 @@ async function mainLoop() {
       }
       // Phase 1.5 — Adventurer's Guild quests (accept → farm to target → finish → next,
       // consecutively). While a quest is pending it OWNS the stamina (LSP refills it).
-      let questPending = false;
       if (!paused && running) questPending = await processQuests();
       // Phase 2 — general farm mobs (stamina rimanente, interrompibili dai timed).
       // SKIPPED while a quest is pending → "non sprecare stamina per le waves": the
@@ -1940,10 +1948,17 @@ async function mainLoop() {
     // beve LSP appena lo vede. Resta sveglio a ~3s così lo aggancia all'istante (AFK-safe).
     const bossWatch = (S.config || []).some(s => s.enabled !== false &&
       (s.targets || []).some(t => t.enabled !== false && t.dungeonBoss));
-    // stamina esaurita e nessun boss da sorvegliare → stato pulito "in attesa" per i
-    // 60s di pausa, invece di lasciare l'ultimo "fetch …/→ mob" appeso sul pannello.
-    if (!bossWatch && stam < SKILL_COST) { status = '⏳ in attesa di stamina…'; renderUI(); }
-    await sleep(bossWatch ? DUNGEON_BOSS_POLL : (stam < SKILL_COST ? 60_000 : 600));
+    // IDLE = giro completo con stamina ma NIENTE fatto (nessun colpo, nessun loot): i target sono
+    // tutti al cap o non ci sono mob vivi → inutile riscorrere le wave ogni 600ms (era lo spam
+    // "fetch g5w11…" col pannello pieno di stamina). Mostra "in attesa" e dormi a lungo; al
+    // risveglio (≤30s) rilegge respawn/stamina freschi e riparte appena c'è qualcosa.
+    const idle = !_didWork && !questPending;
+    let napMs;
+    if (bossWatch)               napMs = DUNGEON_BOSS_POLL;
+    else if (stam < SKILL_COST){ status = '⏳ in attesa di stamina…';       renderUI(); napMs = 60_000; }
+    else if (idle)             { status = '✓ niente da farmare ora · attendo respawn'; renderUI(); napMs = 30_000; }
+    else                         napMs = 600;
+    await sleep(napMs);
   }
 }
 
@@ -2483,7 +2498,7 @@ function renderSettings() {
         <span style="flex:1;color:#dfe6ff">How many to use</span>
         <span id="vfb-mana-val" style="font-weight:bold;color:#6cf">${mN}</span>
       </div>
-      <input type="range" min="0" max="20" step="1" value="${mN}" data-act="manapots" ${mOn?'':'disabled'}
+      <input type="range" min="0" max="4000" step="50" value="${mN}" data-act="manapots" ${mOn?'':'disabled'}
         style="width:100%;margin:7px 0 3px;accent-color:#39f;cursor:pointer;opacity:${mOn?'1':'.45'}">
       <div style="color:#667;font-size:10px">${mOn?`Drinks up to ${mN} mana potion(s) when MP runs low (L item 163, then S 162). Wiring activates with adaptive class detection.`:'OFF — never spends mana potions'}</div>
     </div>`;
@@ -2671,7 +2686,7 @@ function wireSettings() {
     }
     // 🔵 mana potions count slider — update live
     if (el.dataset.act === 'manapots') {
-      S.manaPots = Math.max(0, Math.min(20, parseInt(el.value) || 0)); save();
+      S.manaPots = Math.max(0, Math.min(4000, parseInt(el.value) || 0)); save();
       const vEl = document.getElementById('vfb-mana-val');
       if (vEl) vEl.textContent = S.manaPots;
       return;
@@ -3109,7 +3124,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.59.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.60.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
