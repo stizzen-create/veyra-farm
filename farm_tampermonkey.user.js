@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.55.0
+// @version      1.58.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -970,7 +970,7 @@ async function harvestWaveExp(wave, targets) {
       looted.add(m.id);
       if (r !== null && t.killLimit !== null) {
         S.kills[m.name] = (S.kills[m.name] || 0) + 1;
-        log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}`, '#2f8');
+        log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}${lootSfx(r)}`, '#2f8');
       }
     }
     save();
@@ -1001,8 +1001,12 @@ async function harvestWaveExp(wave, targets) {
 // Defaults to all targets (backwards-compatible).
 async function processWave(wave, targets = null, interruptible = false) {
   targets = targets || wave.targets;
-  status = `fetch ${wave.id}…`;
-  renderUI();
+  // QUIET = nessuna stamina per attaccare: questo giro serve solo a lootare i morti
+  // (gratis). Niente "fetch g5… → Polydevourer…" e niente log grigi di scan: lascia
+  // lo stato "in attesa" impostato dal mainLoop. I morti vengono comunque lootati
+  // (e mostrano cosa si è preso). Vedi richiesta utente: "in attesa → solo waiting".
+  const quiet = stam < 1;
+  if (!quiet) { status = `fetch ${wave.id}…`; renderUI(); }
   // every target loots its dead instances — farm trash AND timed bosses (a killed
   // boss sits dead until looted). Cache makes this ~1 dead-scan per wave / 30s.
   const needDead = true;
@@ -1010,15 +1014,15 @@ async function processWave(wave, targets = null, interruptible = false) {
 
   const aliveN = mobs.filter(x => !x.dead).length;
   const deadN  = mobs.filter(x => x.dead).length;
-  log(`${wave.id}: ${mobs.length} mobs (${aliveN} alive, ${deadN} dead) [${targets.map(t=>t.key).join('+')}]`, '#555');
+  if (!quiet) log(`${wave.id}: ${mobs.length} mobs (${aliveN} alive, ${deadN} dead) [${targets.map(t=>t.key).join('+')}]`, '#555');
 
   // log mob matched per target (così vedi cosa trova)
   for (const t of targets) {
     const matched = mobs.filter(m => t.match(m));
     const aliveM  = matched.filter(m => !m.dead);
-    if (matched.length) {
+    if (!quiet && matched.length) {
       log(`  [${t.key}] ${matched.length} match, ${aliveM.length} alive: ${aliveM.slice(0,6).map(m=>`${m.name}(${fmtDmg(m.userdmg)})`).join(', ')}${aliveM.length>6?'…':''}`, '#888');
-    } else {
+    } else if (!quiet) {
       log(`  [${t.key}] no match`, '#444');
     }
     // the alive boss's REAL death countdown comes from its battle page (auto-die),
@@ -1041,9 +1045,9 @@ async function processWave(wave, targets = null, interruptible = false) {
       if (r !== null) {
         if (t.killLimit !== null) {
           S.kills[m.name] = (S.kills[m.name] || 0) + 1;
-          log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}`, '#2f8');
+          log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}${lootSfx(r)}`, '#2f8');
         } else {
-          log(`loot ✓ ${m.name}`, '#2f8');
+          log(`loot ✓ ${m.name}${lootSfx(r)}`, '#2f8');
         }
       }
     }
@@ -1549,8 +1553,11 @@ function pvpPick(state, myTurns) {
     const v = atFull ? (b.full && b.full.maxDmg) : (b.partial && b.partial.maxDmg);
     return v || e.maxDmg || 0;
   };
+  // Taunt è inutile in 1v1 (forza il bersaglio su di te ma sei solo) — il gioco stesso dice
+  // "Solo PvP AI will not use Taunt". Mai sceglierla. Vedi pvp_skills_kb.json soloPvpExclude.
+  const soloExclude = k => /^\s*taunt\s*$/i.test(k && k.name || '');
   // LANCIABILI ORA = abbastanza TOKEN per il costo, e le full-resource (Ragnarok) anche Rage piena.
-  const usable = skills.filter(k => k.type === 'attack' && tokens >= cost(k) && (!k.requires_full_resource || atFull));
+  const usable = skills.filter(k => k.type === 'attack' && !soloExclude(k) && tokens >= cost(k) && (!k.requires_full_resource || atFull));
   const nukeSk    = skills.find(k => k.requires_full_resource);      // Ragnarok Cleave
   const warAuraSk = skills.find(k => /warrior aura/i.test(k.name));
   const comboCost = cost(warAuraSk) + cost(nukeSk) || 21;            // War Aura(6) + Ragnarok(15) = 21 token
@@ -1578,7 +1585,14 @@ function pvpPick(state, myTurns) {
   const lr = (prof.C && prof.C.lossReasons) || {};
   const outDmgLosses = lr['out-damaged'] || 0, nukeLosses = lr['their nuke'] || 0;
   const dpm = (prof.C && prof.C.dmgToMe || 0) / Math.max(1, prof.C && prof.C.matches || 0);
-  const nukeKiller = nukeLosses >= 1 && outDmgLosses === 0;   // ti batte SOLO col nuke → para
+  // NUKER = il suo colpo più forte è di fascia LETALE. ≥500k separa nettamente i nuker veri
+  // (Assassin/Magic Knight/Grand Mage 720–880k) da TUTTI gli altri (≤377k). Contro un nuker NON
+  // si corre la gara di DPS: si PARA il burst (Ironclad +41% def 2t) e poi si punisce. FIX 2026-06-23
+  // (export 22 KO): l'Assassino era in RACE e perdeva 7/8 al suo Final Wish/Death Mark (Killing Tempo
+  // lo fa scattare 2 volte a risorsa piena). Hardcode Assassin come safety con DB fresco (bigHit non
+  // ancora imparato). Vedi reference-pvp-skills-kb / reference-berserker-pvp-strategy.
+  const isNuker = (prof.C && (prof.C.bigHit?.dmg || 0) >= 500000) || cls === 'Assassin';
+  const nukeKiller = isNuker || (nukeLosses >= 1 && outDmgLosses === 0);   // nuker o ti batte SOLO col nuke → para, non correre
   const race = !nukeKiller && (prof.bursty || outDmgLosses >= 1 || dpm > 400000);
   // miglior colpo NON-ultimate affordable (di norma Power Slash) — il workhorse della race
   const powerHit = usable.filter(k => !k.requires_full_resource && String(k.id) !== '0')
@@ -1906,6 +1920,9 @@ async function mainLoop() {
     // beve LSP appena lo vede. Resta sveglio a ~3s così lo aggancia all'istante (AFK-safe).
     const bossWatch = (S.config || []).some(s => s.enabled !== false &&
       (s.targets || []).some(t => t.enabled !== false && t.dungeonBoss));
+    // stamina esaurita e nessun boss da sorvegliare → stato pulito "in attesa" per i
+    // 60s di pausa, invece di lasciare l'ultimo "fetch …/→ mob" appeso sul pannello.
+    if (!bossWatch && stam < SKILL_COST) { status = '⏳ in attesa di stamina…'; renderUI(); }
     await sleep(bossWatch ? DUNGEON_BOSS_POLL : (stam < SKILL_COST ? 60_000 : 600));
   }
 }
@@ -1952,6 +1969,9 @@ function fmtLoot(r) {
   }
   return parts.join(' · ');
 }
+
+// loot suffix for log lines: " → gold 12K · exp 3.4K · Health Potion×2" (empty if nothing)
+function lootSfx(r) { const s = fmtLoot(r); return s ? ` → ${s}` : ''; }
 
 function bar(n, max, w = 14) {
   const f = Math.min(Math.round(n / max * w), w);
@@ -3042,7 +3062,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.51.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
+  log(`🔧 v1.58.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
   log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
