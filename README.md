@@ -4,17 +4,21 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
 
 > ⚠️ **Use at your own risk.** Unofficial automation for a third‑party game; it may violate the game’s terms of service. Provided for educational purposes. **No credentials are stored** — the script just reads your existing login cookie in the browser at runtime.
 
-> 💻 **Platform support:** currently working on **desktop / PC only**. **Mobile is still in testing** — phones suspend background JavaScript, so it isn't reliable yet. Use the PC version for now.
+> 📱 **Now works on mobile too.** The panel is fully responsive, with a thumb‑friendly bottom **dock** (tap to open / pause, drag anywhere) and a **screen wake‑lock** that keeps the tab alive. It runs while the tab is **open and in the foreground** — see [Mobile](#mobile) below.
 
 ---
 
 ## Screenshots
 
-| Status — live farming | Setup — pick your targets |
+| Status — live farming | ⚔ Auto‑PvP |
 |---|---|
-| ![Status panel](assets/panel-status.png) | ![Setup panel](assets/panel-setup.png) |
+| ![Status panel](assets/panel-status.png) | ![Auto-PvP panel](assets/panel-pvp.png) |
 
-*Left: stamina, kills, boss respawn timers, quests and per‑mob farm bars. Right: toggle how the bot fights, “Scan this page”, and set each target’s stop‑at damage / mode.*
+| Setup — pick your targets | Minimized dock (mobile‑friendly) |
+|---|---|
+| ![Setup panel](assets/panel-setup.png) | ![Dock](assets/panel-dock.png) |
+
+*Top‑left: stamina, kills, lvl/hour, boss respawn timers, quests and per‑mob farm bars. Top‑right: Auto‑PvP — win‑rate, tokens, the per‑class skills it has learned. Bottom‑left: “Scan this page” and each target’s stop‑at damage / mode. Bottom‑right: the collapsed dock — tap the logo to open, tap ⏸/▶ to pause, drag it anywhere.*
 
 ---
 
@@ -27,10 +31,11 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
   - **Adventurer’s Guild quests** — auto accept → farm the quest mob → turn in → next (respects the 2‑day rotation)
 - **⚔ Auto‑PvP** (solo ladder) — toggle it on and the bot self‑matchmakes, plays each turn data‑driven from a per‑enemy‑class DB it **learns** every match (including empowered full‑resource skills), runs a lethal check and a survival brace, and adapts (e.g. races fast/“out‑damaging” classes like Assassins instead of slow‑building). ⚠️ **Tuned for the Berserker kit only** — the skill‑selection logic is **hardcoded around the Berserker’s Rage skills** (Slash / Power Slash / Warrior Aura / Ironclad Strike / Ragnarok Cleave). On other advanced classes it may pick the wrong skills or fall back to weak hits, so **run Auto‑PvP on a Berserker** for now. (Enemy‑class reading and learning are generic; only *your* kit is assumed.)
 - **Exact‑damage hits** — composes 1 / 10 / 50‑stamina attack tiers to land within one small hit of your target (minimal overshoot), which also maximizes per‑hit proc chances.
-- **Auto‑loot** every dead mob it’s responsible for, **auto‑heal** on death, and smart **stamina‑potion** use (only when truly out of stamina, and only the potions you allow).
-- **“Scan this page”** — open any wave or dungeon page, scan it, tick the monsters to attack, set the damage and the mode (⏰ Timed / 🎯 Farm). Edits apply **live**.
+- **Per‑target “match name” filter** — attack only the right boss phase (e.g. fight *Hermes phase 3* by matching `ascended`), so multi‑phase fights aren’t started early.
+- **Auto‑loot** every dead mob it’s responsible for, **auto‑heal** on death, and smart **stamina‑potion** use (only when truly out of stamina, and only the potions you allow — it spends **LSP** and never touches your **FSP** stash).
+- **“Scan this page”** — open any wave or dungeon page, scan it, tick the monsters to attack, set the damage and the mode (⏰ Timed / 🎯 Farm). Targets are **grouped by type** (timed / dungeon / farm) and edits apply **live**.
 - **Pause for manual play** — fully idle while paused (no requests), and the pause **survives page reloads**, so drinking a potion or fighting a boss by hand won’t restart the bot.
-- **Mobile‑friendly** — responsive panel and a **screen wake‑lock** so it keeps running while the tab is open and in the foreground.
+- **Mobile‑ready UI** — responsive panel, a draggable bottom **dock** with one‑tap open/pause (position persists), and a **screen wake‑lock** to keep the tab running while it’s open and in the foreground.
 
 ---
 
@@ -39,19 +44,24 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
 2. Open the script’s **raw** URL → Tampermonkey shows the install page → **Install**.
 3. Open demonicscans.org — the **⚔ Veyra Farm** panel appears bottom‑right.
 
-## Install / update (mobile) — ⚠️ still in testing
-**Mobile support is experimental and not reliable yet** — phones suspend background JavaScript, so the bot only runs with the **tab open and the screen on** (the built‑in wake‑lock keeps the screen awake). For now, prefer the **desktop / PC** version. If you want to try it anyway: install from the hosted raw URL once, and Tampermonkey will offer **one‑tap updates** whenever the version bumps — no copy‑paste needed. Use a Tampermonkey‑capable browser (Firefox, Kiwi, or Microsoft Edge on Android).
+## Mobile
+Use a Tampermonkey‑capable browser — **Firefox**, **Kiwi**, or **Microsoft Edge** on Android:
+1. Install Tampermonkey in that browser, then open the script’s hosted **raw** URL once to install it.
+2. Open demonicscans.org — the panel appears. Tap the bottom **dock** to expand it, set your targets, and let it run.
+3. Whenever the version bumps, Tampermonkey offers **one‑tap updates** straight from the hosted URL — no copy‑paste.
+
+**How it behaves on a phone:** the panel is sized for small screens; the collapsed **dock** sits at the bottom so it’s easy to reach with a thumb (tap the logo to open, tap ⏸/▶ to pause, drag it anywhere and it remembers the spot). A **screen wake‑lock** keeps the screen awake so the tab isn’t suspended.
+
+> ⚠️ **The one limit:** the tab has to stay **open and in the foreground**. If you lock the phone or switch to another app, the browser suspends background JavaScript and the bot pauses until you come back — that’s a browser restriction, not something a userscript can override. The wake‑lock keeps the screen on so it *keeps running* as long as that tab is the one you’re looking at.
 
 ---
 
 ## Using it
-- **Status** tab — stamina, uptime, kills, boss timers, quest progress, per‑mob farm bars.
+- **Status** tab — stamina, uptime, kills, lvl/hour, boss timers, quest progress, per‑mob farm bars.
 - **Log** tab — full per‑hit trace (`copy(window.__farmLog())` in the console for the whole log).
-- **⚙ Setup** tab — 🔍 *Scan this page* → tick targets, set **stop‑at damage** and **kills**, choose ⏰ Timed / 🎯 Farm. `💾 Save` applies everything (edits also auto‑apply as you type).
-- **🗑** resets the top counters (keeps your farm progress) · **⏸ / ▶** pauses/resumes.
-
-## Limitations
-- The browser tab must stay **open and in the foreground**. Locking the phone or switching apps suspends it — a browser limitation, not fixable in a userscript.
+- **⚙ Setup** tab — 🔍 *Scan this page* → tick targets, set **stop‑at damage** and **kills**, choose ⏰ Timed / 🎯 Farm, optional **match‑name** filter. Targets are grouped by type. `💾 Save` applies everything (edits also auto‑apply as you type).
+- **Dock** — collapse the panel to the bottom dock; tap the logo to reopen, tap **⏸ / ▶** to pause/resume, drag it where you like.
+- **🗑** resets the top counters (keeps your farm progress).
 
 ---
 
