@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.53.0
+// @version      1.54.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -145,6 +145,11 @@ const defState = () => ({
   // guild cap. Persisted here; respawns get a NEW dgmid so old entries never block a fresh
   // mob. Bounded to the last 500 to keep GM storage small.
   dlLooted: [],
+  // Biggest single 1-stamina Slash (sk0) damage we've ever observed. Used by the 🏰
+  // dungeon-boss HARD CAP: if even one Slash already exceeds the cap, the bot can't stay
+  // under it (Slash is the smallest possible hit) → it skips the mob WITHOUT hitting,
+  // instead of slashing once and overshooting the guild limit. Learned during normal play.
+  slashDmg: 0,
   minimized: false,        // panel collapsed state — persists across page reloads
   dockPos: null,           // {left,top} of the minimized dock once dragged — persists
   _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
@@ -842,6 +847,15 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return { dmg, reason: 'interrupt' }; }
 
     const remaining = dmgTarget - dmg;
+    // 🏰 HARD CAP — PRE-HIT guard: if even a single 1-stam Slash (the smallest possible
+    // hit, learned globally as S.slashDmg) already exceeds the remaining room, DON'T hit at
+    // all. For a very strong character one Slash can deal e.g. 202M vs a 200M cap, and since
+    // a fight reaches the target in that ONE hit, K is never measured → the K-based guard
+    // below can't catch it. Skip the mob entirely and stay at the starting damage.
+    if (hardCap && S.slashDmg && dmg === startDmg && S.slashDmg > remaining) {
+      log(`🏰 ${label}: una sola Slash ≈${fmtDmg(S.slashDmg)} supererebbe il cap ${fmtDmg(dmgTarget)} → salto (impossibile restare sotto)`, '#fa0');
+      return { dmg: startDmg, reason: 'cap' };
+    }
     // 🏰 HARD CAP (dungeon boss): dmgTarget is a STRICT guild ceiling, not a "stop at".
     // Once even the smallest hit (1 stam ≈ K dmg) would cross it, STOP here and stay UNDER
     // — never overshoot the guild's allowed damage. (Normal targets accept a ≤1-hit
@@ -910,6 +924,8 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
       stall++;
     }
     const hitDmg = nd - before;
+    // Learn the biggest 1-stam Slash we can deal → feeds the 🏰 hard-cap pre-hit guard above.
+    if (tier.stam === SMALLEST.stam && hitDmg > (S.slashDmg || 0)) { S.slashDmg = hitDmg; save(); }
     log(`  ⚔ ${tier.stam}⚡ sk${tier.id} · 💥 +${fmtDmg(hitDmg)} → ${fmtDmg(nd)} / ${fmtDmg(dmgTarget)} · K≈${fmtDmg(Math.round(K))}/st · 🔋${stam}${stall ? ` · ⚠ stall ${stall}` : ''}`, hitDmg > 0 ? '#9be7ff' : '#fa0');
     if (stall >= 3) {
       log(`⛔ ${label}: damage stuck at ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} (cap or undamageable) → moving on`, '#fa0');
