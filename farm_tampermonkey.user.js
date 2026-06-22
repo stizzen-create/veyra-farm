@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.51.0
+// @version      1.53.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -139,6 +139,12 @@ const defState = () => ({
   lvlBaseFrac: null, lvlBaseTs: null,
   _g5w11FarmMigrated: false, // one-time: add the g5w11 trash-farm target to existing saves
   paused: false,
+  // dgmids of guild-dungeon (cube) instances we've already capped at their damage target.
+  // SHARED bosses don't die from our hit, so without remembering this ACROSS page reloads
+  // the bot re-engaged them every load and dealt +1 slash each time, creeping past the
+  // guild cap. Persisted here; respawns get a NEW dgmid so old entries never block a fresh
+  // mob. Bounded to the last 500 to keep GM storage small.
+  dlLooted: [],
   minimized: false,        // panel collapsed state — persists across page reloads
   dockPos: null,           // {left,top} of the minimized dock once dragged — persists
   _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
@@ -596,9 +602,19 @@ const _waveCache = {};
 const CACHE_TTL  = 30_000;
 
 // Guild-dungeon LOCATION caches: _dlCache throttles page reads per source; _dlLooted
-// records dgmids we've already claimed (cleared implicitly — respawns get new dgmids).
+// records dgmids we've already claimed. PERSISTED across page reloads (S.dlLooted) so a
+// capped cube boss isn't re-engaged for +1 slash on every navigation — respawns get new
+// dgmids so old entries never block a fresh mob.
 const _dlCache  = {};
-const _dlLooted = new Set();
+const _dlLooted = new Set(S.dlLooted || []);
+// Mark a dgmid as claimed and persist it (bounded to the last 500 to keep storage small).
+// Call save() afterwards (existing call sites already do).
+function lootedAdd(dgmid) {
+  _dlLooted.add(dgmid);
+  let arr = [..._dlLooted];
+  if (arr.length > 500) { arr = arr.slice(-500); _dlLooted.clear(); for (const d of arr) _dlLooted.add(d); }
+  S.dlLooted = arr;
+}
 
 const DEAD_PAGES = 6;   // max dead pages to scan per wave
 
@@ -893,7 +909,8 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     } else {
       stall++;
     }
-    log(`  ⚔ ${tier.stam}st sk${tier.id} · ${fmtDmg(before)}→${fmtDmg(nd)} (+${fmtDmg(nd - before)}) · K≈${fmtDmg(Math.round(K))}/st · stam=${stam}${stall ? ` · stall=${stall}` : ''} · msg="${msg.replace(/<[^>]+>/g, '').slice(0, 36)}"`, '#668');
+    const hitDmg = nd - before;
+    log(`  ⚔ ${tier.stam}⚡ sk${tier.id} · 💥 +${fmtDmg(hitDmg)} → ${fmtDmg(nd)} / ${fmtDmg(dmgTarget)} · K≈${fmtDmg(Math.round(K))}/st · 🔋${stam}${stall ? ` · ⚠ stall ${stall}` : ''}`, hitDmg > 0 ? '#9be7ff' : '#fa0');
     if (stall >= 3) {
       log(`⛔ ${label}: damage stuck at ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} (cap or undamageable) → moving on`, '#fa0');
       return { dmg, reason: 'cap' };
@@ -1154,10 +1171,12 @@ async function processDungeonLocation(src) {
     for (const { t, fn } of matched) {
       if (!fn(m)) continue;
       const r = await lootMob({ dgmid: m.dgmid, instance_id: m.instance_id });
-      _dlLooted.add(m.dgmid);
-      if (r !== null && t.killLimit !== null) {
-        S.kills[m.name] = (S.kills[m.name] || 0) + 1;
-        log(`loot ✓ 🏰 ${m.name} — kill #${S.kills[m.name]}`, '#2f8');
+      lootedAdd(m.dgmid);
+      if (r !== null) {
+        if (t.killLimit !== null) S.kills[m.name] = (S.kills[m.name] || 0) + 1;
+        const kc   = t.killLimit !== null ? ` · kill #${S.kills[m.name]}` : '';
+        const loot = fmtLoot(r);
+        log(`💰 loot 🏰 ${m.name}${kc}${loot ? ` → ${loot}` : ' (vuoto)'}`, '#ffd54a');
       }
       break;   // one target claims it
     }
@@ -1167,7 +1186,11 @@ async function processDungeonLocation(src) {
   // fight alive matching instances
   for (const { t, fn } of matched) {
     if (paused || !running) break;
-    const alive = mons.filter(m => !m.dead && fn(m) &&
+    // SKIP mobs we already reached the target on (added to _dlLooted below). Cube mobs
+    // are SHARED damage targets that don't die from our hit, so loot fails and they stay
+    // "alive" — without this skip the same mob got re-fought every pass and kept dealing
+    // damage FAR past the configured target ("continua a fare danno sopra i 200M").
+    const alive = mons.filter(m => !m.dead && fn(m) && !_dlLooted.has(m.dgmid) &&
       (t.killLimit === null || (S.kills[m.name] || 0) < t.killLimit));
     for (const m of alive) {
       if (paused || !running) break;
@@ -1175,16 +1198,19 @@ async function processDungeonLocation(src) {
         if (t.useLSP) await useLSP(t.timer || t.dungeonBoss);
         if (stam < 1) { log(`no stamina — stop 🏰 ${t.key}`, '#fa0'); return; }
       }
-      log(`→ 🏰 ${m.name} (target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
+      log(`⚔️ attacco 🏰 ${m.name} → target ${fmtDmg(t.dmgTarget)} · 🔋${stam}`, '#7df');
       const idp = { dgmid: m.dgmid, instance_id: m.instance_id };
       // dungeonBoss → exact tiers + drink unconditionally + HARD CAP (never cross the guild limit).
       const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact || !!t.dungeonBoss, null, t.timer || t.dungeonBoss, !!t.dungeonBoss);
       if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
         const r = await lootMob(idp);
-        _dlLooted.add(m.dgmid);
+        lootedAdd(m.dgmid);   // claimed (persisted) → won't be re-fought even after a reload
         if (r !== null && t.killLimit !== null) S.kills[m.name] = (S.kills[m.name] || 0) + 1;
         delete _dlCache[src.id];   // state changed → re-read the page next pass
-        log(`✓ 🏰 ${m.name} — ${fmtDmg(dmg)}`, '#2f8');
+        const loot = r !== null ? fmtLoot(r) : null;
+        const tag  = reason === 'dead' ? '☠️' : reason === 'cap' ? '🛑' : '✅';
+        const col  = reason === 'cap' ? '#fa0' : '#2f8';
+        log(`${tag} 🏰 ${m.name} — ${fmtDmg(dmg)} / target ${fmtDmg(t.dmgTarget)}${loot ? ` · 💰 ${loot}` : ''}`, col);
       }
       save();
     }
@@ -1881,6 +1907,35 @@ function fmtDmg(n) {
   if (n >= 1_000_000)     return `${(n/1e6).toFixed(1)}M`;
   if (n >= 1_000)         return `${(n/1e3).toFixed(0)}K`;
   return String(n);
+}
+
+// Render a loot rewards object (shape varies per endpoint) into a short readable string,
+// e.g. "gold 12K · exp 3.4K · Health Potion×2". Defensive: handles numbers, arrays of
+// items ({name,qty} or plain strings) and nested objects without knowing the exact schema.
+function fmtLoot(r) {
+  if (r == null) return '';
+  if (typeof r !== 'object') return String(r);
+  const parts = [];
+  for (const [k, v] of Object.entries(r)) {
+    if (v == null || v === 0 || v === '' || v === false) continue;
+    if (Array.isArray(v)) {
+      for (const it of v) {
+        if (it == null) continue;
+        if (typeof it === 'object') {
+          const nm = it.name || it.item || it.title || '?';
+          const q  = it.qty || it.quantity || it.amount || it.count;
+          parts.push(q ? `${nm}×${q}` : nm);
+        } else parts.push(String(it));
+      }
+    } else if (typeof v === 'object') {
+      const inner = fmtLoot(v); if (inner) parts.push(inner);
+    } else if (typeof v === 'number') {
+      parts.push(`${k} ${v >= 1000 ? fmtDmg(v) : v}`);
+    } else {
+      parts.push(`${k}: ${v}`);
+    }
+  }
+  return parts.join(' · ');
 }
 
 function bar(n, max, w = 14) {
@@ -2765,7 +2820,7 @@ function buildUI() {
     const r = dockEl.getBoundingClientRect();
     // remember WHAT was pressed: pointer capture (below) steals the synthetic `click`
     // from the child elements, so we resolve the tap here in pointerup instead.
-    dockDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY, tgt: e.target, pid: e.pointerId };
+    dockDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY, tgt: e.target };
     dockMoved = false;
     try { dockEl.setPointerCapture(e.pointerId); } catch {}
   });
@@ -2777,13 +2832,9 @@ function buildUI() {
     e.preventDefault();
     applyDockPos(e.clientX - dockDrag.dx, e.clientY - dockDrag.dy);
   });
-  const endDockDrag = e => {
+  const endDockDrag = () => {
     if (!dockDrag) return;
     const tgt = dockDrag.tgt;
-    // explicit release — on some webviews a missed releasePointerCapture leaves the
-    // capture "stuck" on this pointerId, so the NEXT tap's events never reach the
-    // dock at all (the symptom: pill taps do nothing, every time).
-    try { dockEl.releasePointerCapture(dockDrag.pid); } catch {}
     dockDrag = null;
     dockEl.style.cursor = 'grab';
     if (dockMoved) {
@@ -2797,19 +2848,6 @@ function buildUI() {
   };
   dockEl.addEventListener('pointerup', endDockDrag);
   dockEl.addEventListener('pointercancel', endDockDrag);
-
-  // FALLBACK: on some mobile browsers / webviews the pointer-capture drag logic above
-  // can silently swallow the gesture (no pointerup ever fires, e.g. after a Pointer
-  // Events quirk or a DOM reflow mid-touch) — the dock then looks "dead", no reaction
-  // on tap. A plain `click` listener is a second, independent path to the same
-  // actions: harmless when the drag path already handled it (no-op double toggle is
-  // avoided by only firing here if no drag/measurable move was registered), and a
-  // safety net when it didn't.
-  dockEl.addEventListener('click', e => {
-    if (dockMoved) return; // a real drag already happened — ignore the trailing click
-    if (e.target.closest('#vfb-dock-pp')) { e.stopPropagation(); setPaused(!paused); return; }
-    if (e.target.closest('#vfb-dock-logo')) { e.stopPropagation(); setMinimized(false); }
-  });
 
   // Delegated click handler for buttons INSIDE the status tab. The status tab is
   // re-rendered every 2s via innerHTML, so a per-button onclick wouldn't survive —
