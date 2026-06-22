@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.54.0
+// @version      1.55.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -145,11 +145,6 @@ const defState = () => ({
   // guild cap. Persisted here; respawns get a NEW dgmid so old entries never block a fresh
   // mob. Bounded to the last 500 to keep GM storage small.
   dlLooted: [],
-  // Biggest single 1-stamina Slash (sk0) damage we've ever observed. Used by the 🏰
-  // dungeon-boss HARD CAP: if even one Slash already exceeds the cap, the bot can't stay
-  // under it (Slash is the smallest possible hit) → it skips the mob WITHOUT hitting,
-  // instead of slashing once and overshooting the guild limit. Learned during normal play.
-  slashDmg: 0,
   minimized: false,        // panel collapsed state — persists across page reloads
   dockPos: null,           // {left,top} of the minimized dock once dragged — persists
   _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
@@ -607,17 +602,32 @@ const _waveCache = {};
 const CACHE_TTL  = 30_000;
 
 // Guild-dungeon LOCATION caches: _dlCache throttles page reads per source; _dlLooted
-// records dgmids we've already claimed. PERSISTED across page reloads (S.dlLooted) so a
-// capped cube boss isn't re-engaged for +1 slash on every navigation — respawns get new
-// dgmids so old entries never block a fresh mob.
+// records the dgmids we've already dealt our target damage to. PERSISTED across page
+// reloads (S.dlLooted = [[dgmid, ts], …]) so a capped cube mob isn't re-hit — and re-hit,
+// and re-hit — on every navigation/scan (the bug: "ogni check aggiunge danno"). Entries
+// EXPIRE after DL_TTL: the cube is a DAILY dungeon, so yesterday's "done" marks must drop
+// or the bot would never farm it again when it re-opens.
+const DL_TTL    = 18 * 3600_000;   // 18h — long enough to cover a farming session, short
+                                   // enough that the next daily opening starts fresh
 const _dlCache  = {};
-const _dlLooted = new Set(S.dlLooted || []);
+const _dlLooted = new Map();        // dgmid → timestamp we hit our target
+for (const e of (S.dlLooted || [])) {   // load surviving (non-expired) marks
+  if (Array.isArray(e) && Date.now() - e[1] < DL_TTL) _dlLooted.set(e[0], e[1]);
+}
+// True only if this dgmid was claimed AND the claim hasn't expired (auto-prunes stale ones
+// so a 24/7 run without a reload still re-farms the dungeon when it re-opens next day).
+function isLooted(dgmid) {
+  const t = _dlLooted.get(dgmid);
+  if (t == null) return false;
+  if (Date.now() - t >= DL_TTL) { _dlLooted.delete(dgmid); return false; }
+  return true;
+}
 // Mark a dgmid as claimed and persist it (bounded to the last 500 to keep storage small).
 // Call save() afterwards (existing call sites already do).
 function lootedAdd(dgmid) {
-  _dlLooted.add(dgmid);
-  let arr = [..._dlLooted];
-  if (arr.length > 500) { arr = arr.slice(-500); _dlLooted.clear(); for (const d of arr) _dlLooted.add(d); }
+  _dlLooted.set(dgmid, Date.now());
+  let arr = [..._dlLooted.entries()];
+  if (arr.length > 500) { arr = arr.slice(-500); _dlLooted.clear(); for (const [d, t] of arr) _dlLooted.set(d, t); }
   S.dlLooted = arr;
 }
 
@@ -847,15 +857,6 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return { dmg, reason: 'interrupt' }; }
 
     const remaining = dmgTarget - dmg;
-    // 🏰 HARD CAP — PRE-HIT guard: if even a single 1-stam Slash (the smallest possible
-    // hit, learned globally as S.slashDmg) already exceeds the remaining room, DON'T hit at
-    // all. For a very strong character one Slash can deal e.g. 202M vs a 200M cap, and since
-    // a fight reaches the target in that ONE hit, K is never measured → the K-based guard
-    // below can't catch it. Skip the mob entirely and stay at the starting damage.
-    if (hardCap && S.slashDmg && dmg === startDmg && S.slashDmg > remaining) {
-      log(`🏰 ${label}: una sola Slash ≈${fmtDmg(S.slashDmg)} supererebbe il cap ${fmtDmg(dmgTarget)} → salto (impossibile restare sotto)`, '#fa0');
-      return { dmg: startDmg, reason: 'cap' };
-    }
     // 🏰 HARD CAP (dungeon boss): dmgTarget is a STRICT guild ceiling, not a "stop at".
     // Once even the smallest hit (1 stam ≈ K dmg) would cross it, STOP here and stay UNDER
     // — never overshoot the guild's allowed damage. (Normal targets accept a ≤1-hit
@@ -924,8 +925,6 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
       stall++;
     }
     const hitDmg = nd - before;
-    // Learn the biggest 1-stam Slash we can deal → feeds the 🏰 hard-cap pre-hit guard above.
-    if (tier.stam === SMALLEST.stam && hitDmg > (S.slashDmg || 0)) { S.slashDmg = hitDmg; save(); }
     log(`  ⚔ ${tier.stam}⚡ sk${tier.id} · 💥 +${fmtDmg(hitDmg)} → ${fmtDmg(nd)} / ${fmtDmg(dmgTarget)} · K≈${fmtDmg(Math.round(K))}/st · 🔋${stam}${stall ? ` · ⚠ stall ${stall}` : ''}`, hitDmg > 0 ? '#9be7ff' : '#fa0');
     if (stall >= 3) {
       log(`⛔ ${label}: damage stuck at ${fmtDmg(dmg)}/${fmtDmg(dmgTarget)} (cap or undamageable) → moving on`, '#fa0');
@@ -1183,7 +1182,7 @@ async function processDungeonLocation(src) {
   // loot dead matching instances — ONCE per dgmid (a looted instance keeps showing
   // until it respawns with a NEW dgmid, so the set never blocks a fresh kill).
   for (const m of mons.filter(x => x.dead)) {
-    if (_dlLooted.has(m.dgmid)) continue;
+    if (isLooted(m.dgmid)) continue;
     for (const { t, fn } of matched) {
       if (!fn(m)) continue;
       const r = await lootMob({ dgmid: m.dgmid, instance_id: m.instance_id });
@@ -1206,7 +1205,7 @@ async function processDungeonLocation(src) {
     // are SHARED damage targets that don't die from our hit, so loot fails and they stay
     // "alive" — without this skip the same mob got re-fought every pass and kept dealing
     // damage FAR past the configured target ("continua a fare danno sopra i 200M").
-    const alive = mons.filter(m => !m.dead && fn(m) && !_dlLooted.has(m.dgmid) &&
+    const alive = mons.filter(m => !m.dead && fn(m) && !isLooted(m.dgmid) &&
       (t.killLimit === null || (S.kills[m.name] || 0) < t.killLimit));
     for (const m of alive) {
       if (paused || !running) break;
