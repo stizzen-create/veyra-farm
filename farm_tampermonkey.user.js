@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.62.1
+// @version      1.63.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -129,6 +129,7 @@ const SK = 'veyra_mfarm_v1';
 const defState = () => ({
   kills: {}, attacks: 0, timers: {}, lspInv: null, potInv: {}, started: Date.now(),
   timedKills: 0, timedBy: {}, lspUses: 0, hpHeals: 0, pos: null, config: null,
+  debug: false,            // verbose scan/diagnostic log lines (off = clean, user-friendly log)
   farmSeen: {},            // name → last-seen ts: farm mobs we've encountered, so the
                            // 🎯 Farming tab lists what we farm even before the 1st kill
   // ── Leveling rate (replaces the old HP readout in the status grid) ─────────────
@@ -294,6 +295,10 @@ function log(msg, color = '#aaa') {
   try { window.__farmLog = () => fullLog.join('\n'); } catch {}
   console.log(`[FarmBot ${ts}] ${msg}`);
 }
+
+// debug-only log: noisy per-scan / diagnostic lines that a first-time user doesn't need.
+// Hidden unless 🐞 Debug log is toggled on in Setup. Keeps the default log readable.
+function dlog(msg, color = '#556') { if (S && S.debug) log(msg, color); }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -696,7 +701,7 @@ async function fetchWave(url, needDead = false) {
   if (needDead) {
     setHideDead(false);
     for (let p = 1; p <= DEAD_PAGES; p++) {
-      status = `fetch dead ${p}/${DEAD_PAGES}…`; renderUI();
+      status = '🔍 checking for loot…'; renderUI();
       const h2   = await getHtml(withDeadPage(url, p));
       const more = parseMobs(h2);
       let added  = 0;
@@ -1029,16 +1034,16 @@ async function processWave(wave, targets = null, interruptible = false) {
 
   const aliveN = mobs.filter(x => !x.dead).length;
   const deadN  = mobs.filter(x => x.dead).length;
-  if (!quiet) log(`${wave.id}: ${mobs.length} mobs (${aliveN} alive, ${deadN} dead) [${targets.map(t=>t.key).join('+')}]`, '#555');
+  if (!quiet) dlog(`${wave.id}: ${mobs.length} mobs (${aliveN} alive, ${deadN} dead) [${targets.map(t=>t.key).join('+')}]`, '#555');
 
-  // log mob matched per target (così vedi cosa trova)
+  // per-target match trace — debug-only (was flooding the default log every ~3s)
   for (const t of targets) {
     const matched = mobs.filter(m => t.match(m));
     const aliveM  = matched.filter(m => !m.dead);
     if (!quiet && matched.length) {
-      log(`  [${t.key}] ${matched.length} match, ${aliveM.length} alive: ${aliveM.slice(0,6).map(m=>`${m.name}(${fmtDmg(m.userdmg)})`).join(', ')}${aliveM.length>6?'…':''}`, '#888');
+      dlog(`  [${t.key}] ${matched.length} match, ${aliveM.length} alive: ${aliveM.slice(0,6).map(m=>`${m.name}(${fmtDmg(m.userdmg)})`).join(', ')}${aliveM.length>6?'…':''}`, '#888');
     } else if (!quiet) {
-      log(`  [${t.key}] no match`, '#444');
+      dlog(`  [${t.key}] no match`, '#444');
     }
     // the alive boss's REAL death countdown comes from its battle page (auto-die),
     // not data-expire — refreshTimers() fetches it. Here we just clear it when dead.
@@ -1232,7 +1237,7 @@ async function processDungeonLocation(src) {
         if (t.useLSP) await useLSP(t.timer || t.dungeonBoss);
         if (stam < 1) { log(`no stamina — stop 🏰 ${t.key}`, '#fa0'); return; }
       }
-      log(`⚔️ attacco 🏰 ${m.name} → target ${fmtDmg(t.dmgTarget)} · 🔋${stam}`, '#7df');
+      log(`⚔️ attacking 🏰 ${m.name} → target ${fmtDmg(t.dmgTarget)} · 🔋${stam}`, '#7df');
       const idp = { dgmid: m.dgmid, instance_id: m.instance_id };
       // dungeonBoss → exact tiers + drink unconditionally + HARD CAP (never cross the guild limit).
       const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact || !!t.dungeonBoss, null, t.timer || t.dungeonBoss, !!t.dungeonBoss);
@@ -1407,7 +1412,7 @@ async function processQuests() {
             log(`📜 quest accepted: ${p.title}${p.monster ? ` → ${p.monster}` : ''} (min ${fmtDmg(p.minDmg)})`, '#9cf');
           } else log(`quest accept failed (${p.title}): ${r?.message || 'no resp'}`, '#f66');
         } else {
-          log(`quests: none available · ${_questCooldowns.length} on cooldown`, '#778');
+          dlog(`quests: none available · ${_questCooldowns.length} on cooldown`, '#778');
         }
       }
 
@@ -2063,8 +2068,9 @@ function renderStatus() {
       ${stat('⏱', fmt(now - S.started), 'uptime')}
       ${stat('💀', totalK.toLocaleString(), 'farm kills')}
       ${stat('👑', S.timedKills.toLocaleString(), 'boss kills', '#f90')}
-      ${stat('🧪', potStock, 'pots left' + (potNone ? ' ⚠' : ''), potNone ? '#f66' : '#cfe')}
-      ${stat('❤️', S.hpHeals.toLocaleString(), 'heals' + (hpEmpty ? ' (0!)' : ''), hpEmpty ? '#f66' : '#cfe')}
+      ${stat('🧪', potStock, 'stamina pots left' + (potNone ? ' ⚠' : ''), potNone ? '#f66' : '#cfe')}
+      ${stat('🧴', S.lspUses.toLocaleString(), 'pots used')}
+      ${stat('❤️', S.hpHeals.toLocaleString(), 'HP heals' + (hpEmpty ? ' (0!)' : ''), hpEmpty ? '#f66' : '#cfe')}
       ${(() => { const lph = lvlPerHour();
          return stat('📈', lph == null ? '—' : lph.toFixed(lph >= 10 ? 0 : 1),
                      'lvl/hr' + (userLevel != null ? ` · LV${userLevel.toLocaleString()}` : ''),
@@ -2079,7 +2085,7 @@ function renderStatus() {
   // dead   → respawn countdown from the auto-summon next-ts (S.timers, name match).
   const timedTargets = WAVES.flatMap(w => w.targets.filter(t => t.timer));
   if (timedTargets.length) {
-    h += `<div style="color:#f90;font-size:12px;font-weight:bold;margin-bottom:5px">⏰ Boss timers <span style="color:#666;font-weight:normal">· ${S.timedKills} done</span></div>`;
+    h += `<div style="color:#f90;font-size:11px;font-weight:bold;margin-bottom:3px">⏰ Boss timers <span style="color:#666;font-weight:normal">· ${S.timedKills} done</span></div>`;
     for (const t of timedTargets) {
       const exp  = liveBoss[t.key];                                 // alive auto-die ts (s)
       const tm   = Object.entries(S.timers).find(([nm, v]) => v && t.match({ name: nm }));
@@ -2095,10 +2101,11 @@ function renderStatus() {
       } else {
         info = `<span style="color:#777">… waiting for data</span>`;
       }
-      const short = t.label.length > 28 ? t.label.slice(0,28)+'…' : t.label;
-      h += `<div style="font-size:12px;margin-bottom:4px;color:#fab">
-        ${short} ${done ? `<span style="color:#2f8;font-size:11px">×${done}</span>` : ''}
-        <br>&nbsp;&nbsp;→ ${info}</div>`;
+      const short = t.label.length > 22 ? t.label.slice(0,22)+'…' : t.label;
+      // compact single row (name left · status right) — smaller text for mobile
+      h += `<div style="font-size:10px;line-height:1.35;margin-bottom:2px;display:flex;justify-content:space-between;gap:6px">
+        <span style="color:#fab;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${short}${done ? ` <span style="color:#2f8">×${done}</span>` : ''}</span>
+        <span style="flex-shrink:0">${info}</span></div>`;
     }
     h += `<div style="border-top:1px solid #2a2a44;margin:7px 0"></div>`;
   }
@@ -2488,6 +2495,10 @@ function renderSettings() {
         '📜 Auto Adventurer&apos;s Guild quests',
         'Accept a quest → farm its mob on g5w9 (≥5m each) → turn in → next',
         'Quests off — never touch the Adventurer&apos;s Guild');
+  h += toggleRow('debuglog', S.debug,
+        '🐞 Debug log',
+        'Verbose: every wave scan + per-target match line (for troubleshooting)',
+        'Clean log — only real actions (attacks, loot, level-ups, potions, waiting)');
 
   // ── HP auto-heal slider ──────────────────────────────────────────────────────
   // 0 = OFF (never spend HP potions, wait for regen) · 5..90 = heal when HP ≤ that %.
@@ -2737,6 +2748,7 @@ function wireSettings() {
     if (a === 'smallhits')  { S.smallHits   = el.checked; save(); renderSettings(); return; }
     if (a === 'lspenable')  { S.lspEnabled  = el.checked; save(); renderSettings(); return; }
     if (a === 'questenable'){ S.questEnabled= el.checked; save(); renderSettings(); return; }
+    if (a === 'debuglog')   { S.debug       = el.checked; save(); renderSettings(); return; }
     if (a === 'manaenable') { S.manaEnabled = el.checked; save(); renderSettings(); return; }
     const w = wave(el.dataset.wi); if (!w) return;
     const nm = el.dataset.name;
@@ -3147,8 +3159,8 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 v1.60.0 started · ${paused ? '⏸ PAUSED (manual play — press ▶ to farm)' : '▶ running'} · exact 1/10/50 hits · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'} · farm: harvest exp before potion · screen wake-lock (mobile) · LSP(251) only — FSP never touched · view cookies: hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')}`, '#9cf');
-  log(`🐞 debug ON · Log tab = hit trace · console: copy(window.__farmLog())`, '#778');
+  log(`🔧 Veyra Farm v1.63.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
+  dlog(`debug: exact 1/10/50 hits · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
   try {
