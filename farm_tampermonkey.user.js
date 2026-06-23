@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.61.0
+// @version      1.62.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1595,6 +1595,16 @@ function pvpPick(state, myTurns) {
   const enemyResFull   = eMax > 0 && (enemy.advanced_resource || 0) >= eMax && !enemyStunned;
   const haveNuke = Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n)) || !!nukeSk;
 
+  // HP% MIO — la combo War Aura→Ragnarok va scaricata SOTTO il 50% HP. Lì la lifesteal di Ragnarok
+  // (Blood Frenzy scala con la vita mancante: ~43-50%) SUPERA la backlash da 261k → Ragnarok NET-HEALA
+  // mentre nuca, ed è il picco di danno del Berserker. SOPRA il 50% NON si spreca: si Slasha (gratis),
+  // si CONSERVANO i token, si lascia ciclare la Rage (use-it-or-lose-it) e rampare il Rage Engine.
+  // Idea di UANM 2026-06-23: "conserva i token, sotto il 50% combo War Aura→Ragnarok e ti curi subito".
+  const meP = Object.values(state.teams?.ally?.players_by_num || {})[0] || {};
+  const myHpPct = meP.hp_max ? (meP.hp || 0) / meP.hp_max : 1;
+  const lowHp = myHpPct <= 0.50;          // finestra Ragnarok (net-heal)
+  const comboWindow = myHpPct <= 0.55;    // lead-in: War Aura il turno prima, così lo shred è su quando scendi sotto 50
+
   // RACE MODE — contro nemici VELOCI/bursty o che storicamente ti battono a DPS (`out-damaged`,
   // es. l'Assassino): NON rallentare con Slash (45k) come filler né sprecare turni in Ironclad.
   // Corri col miglior colpo affordable (Power Slash ~455k) tenendo i token per il Ragnarok a Rage
@@ -1641,7 +1651,11 @@ function pvpPick(state, myTurns) {
   //    ancora nel DB, provalo per impararlo.
   if (atFull) {
     const nuke = usable.find(k => k.requires_full_resource);
-    if (nuke) { S.pvp.note = nuke.name + '@full'; return { id: nuke.id, tk: enemy.key }; }
+    // Ragnarok SOLO sotto il 50% HP (lì net-heala col lifesteal). Sopra il 50%: NON bruciarlo a vita
+    // alta (backlash 261k con poca cura) — Slasha, lascia ciclare la Rage e conserva i token finché
+    // non scendi in finestra. Il `lethal` (step 1) chiude comunque la partita a qualunque HP.
+    if (nuke && lowHp) { S.pvp.note = nuke.name + '@full (lowHP heal)'; return { id: nuke.id, tk: enemy.key }; }
+    if (nuke && !lowHp && slash) { S.pvp.note = 'hold Ragnarok (HP ' + Math.round(myHpPct * 100) + '% > 50)'; return { id: slash.id, tk: enemy.key }; }
     // l'ultimate ESISTE ma non ho i token (tokens < costo) → Slash per RICARICARE token, NON bruciare
     // la finestra su un mid-skill (la Rage si azzera comunque, al prossimo ciclo nuko coi token su).
     if (nukeSk && slash) { S.pvp.note = 'wait tokens (' + tokens + '/' + cost(nukeSk) + ')'; return { id: slash.id, tk: enemy.key }; }
@@ -1654,26 +1668,27 @@ function pvpPick(state, myTurns) {
   // 4) ULTIMO COLPO PRIMA DEL PIENO (rage ≥ max-25) → War Aura (shred), così a 100 Ragnarok colpisce
   //    a difesa abbassata. MA solo se ho ≥ comboCost (21) token: War Aura ORA (6) + Ragnarok dopo (15).
   //    Se non ho abbastanza token → continua a Slashare (gratis) per rigenerarli. Vale anche vs healer.
-  if (!atFull && rage >= max - 25 && warAuraSk && !shredUp && haveNuke && tokens >= comboCost) {
+  // Solo IN FINESTRA (HP ≤ 55%): se sopra il 50% si conservano i token e si Slasha — non si imposta
+  // la combo a vita alta perché il Ragnarok dopo non andrebbe comunque (lo si terrebbe, vedi step 3).
+  if (!atFull && comboWindow && rage >= max - 25 && warAuraSk && !shredUp && haveNuke && tokens >= comboCost) {
     S.pvp.note = 'war aura (combo setup)'; return { id: warAuraSk.id, tk: enemy.key };
   }
 
-  // 4b) FILLER (default — ex "race", ora per OGNI matchup): invece di Slash (45k) usa il miglior colpo
-  //     affordable, ma tieni SEMPRE da parte i 15 token del Ragnarok così la combo a Rage piena non
-  //     viene mai affamata (il Ragnarok ~967k vale ~2 Power Slash → non si sacrifica mai). Scelta
-  //     situazionale (idea di UANM): se il nemico sta per nukare (risorsa carica) e non ho difesa su →
-  //     Ironclad (≈198k + GRANTS +41% def 2 turni, costa 1 token meno di Power Slash: para E fa danno);
-  //     altrimenti Power Slash (≈455k, massimo DPS per vincere la gara di danno).
-  //     DIAGNOSI 2026-06-21 (export 68W/20L): nelle SCONFITTE il bot fa ~0.5–1.6M danno vs ~2–2.7M nelle
-  //     vittorie → perdeva (out-damaged/out-healed) perché slashava (45k) invece di Power-slashare (455k).
-  if (haveNuke && powerHit) {
-    const reserve = nukeSk ? cost(nukeSk) : 0;                                  // 15 token sempre riservati al Ragnarok
-    const threat  = (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer;
-    const filler  = (threat && ironclad) ? ironclad : powerHit;                 // sotto minaccia: Ironclad (danno+DEF, più economico)
-    if ((dmgOf(filler) || 0) > (dmgOf(slash) || 0) && tokens - cost(filler) >= reserve) {
-      S.pvp.note = (filler === ironclad ? 'def-filler ' : 'filler ') + filler.name;
-      return { id: filler.id, tk: enemy.key };
+  // 4b) DIFESA SOTTO MINACCIA (solo conservazione token) — col Ragnarok equipaggiato (haveNuke) NON si
+  //     fa più il "filler aggressivo" Power Slash: bruciava i token che servono alla combo. L'UNICA
+  //     spesa di token concessa fuori-finestra è l'Ironclad DIFENSIVO quando il nemico sta per nukare e
+  //     non ho difesa su (≈198k + GRANTS +41% def 2 turni): para il colpo e ti tiene vivo fino alla
+  //     finestra <50% HP, e solo se restano i 21 token della combo. Altrimenti → Slash (conserva).
+  //     FIX 2026-06-23 (export 110W/23L · strategia UANM): conserva token, sotto il 50% combo che net-heala.
+  //     Vedi reference-berserker-pvp-strategy. Le classi SENZA ultimate usano ancora il miglior colpo.
+  if (haveNuke) {
+    const threat = (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer;
+    if (threat && ironclad && tokens - cost(ironclad) >= comboCost) {
+      S.pvp.note = 'def-filler ' + ironclad.name; return { id: ironclad.id, tk: enemy.key };
     }
+    // niente minaccia → CONSERVA: cadi a Slash (step 5) per caricare Rage e rigenerare token.
+  } else if (powerHit && (dmgOf(powerHit) || 0) > (dmgOf(slash) || 0)) {
+    S.pvp.note = 'filler ' + powerHit.name; return { id: powerHit.id, tk: enemy.key };
   }
 
   // 5) BUILD — Slash (gratis): ora solo FALLBACK, quando non posso permettermi un filler vero senza
