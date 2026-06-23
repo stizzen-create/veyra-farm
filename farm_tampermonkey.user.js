@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.63.0
+// @version      1.64.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1609,6 +1609,13 @@ function pvpPick(state, myTurns) {
   const myHpPct = meP.hp_max ? (meP.hp || 0) / meP.hp_max : 1;
   const lowHp = myHpPct <= 0.50;          // finestra Ragnarok (net-heal)
   const comboWindow = myHpPct <= 0.55;    // lead-in: War Aura il turno prima, così lo shred è su quando scendi sotto 50
+  // SCUDO NEMICO — il Magic Knight (Eclipse Sever) e il Paladin si auto-scudano (~90-700k): un Ragnarok
+  // ci sbatte contro e viene ASSORBITO (loss 2026-06-23 vs MK: #111 Ragnarok 316k BLOCCATI). Non sprecare
+  // il burst in uno scudo grosso → Slasha e aspetta che svanisca (la Rage ricicla). Vedi reference-pvp-skills-kb.
+  const enemyShield = Number(enemy.shield) ||
+    (() => { const s = (enemy.effects || []).find(e => /shield/i.test(e.label || e.key || ''));
+             return s ? (parseInt(String(s.value).replace(/[^\d]/g, '')) || 0) : 0; })();
+  const enemyShielded = enemyShield > 150000;   // scudo grosso → il Ragnarok verrebbe in gran parte bloccato
   // La strategia "conserva token + combo a vita bassa" è SPECIFICA del Berserker: solo RAGNAROK CLEAVE
   // net-heala a HP basso (Blood Frenzy) e solo lui ha il setup War Aura. Le ALTRE classi (un amico che usa
   // l'AutoPvP — Assassin/Mage/Magic Knight…) NON devono tenere l'ultimate per il low-HP: il loro nuke
@@ -1666,6 +1673,11 @@ function pvpPick(state, myTurns) {
     // bruciarlo a vita alta (backlash 261k con poca cura) — Slasha, lascia ciclare la Rage e conserva i
     // token. ALTRE classi: il loro ultimate va a risorsa piena SUBITO (no hold). `lethal` (step 1) chiude
     // comunque la partita a qualunque HP.
+    // SCUDO: se il nemico ha uno scudo grosso il Ragnarok verrebbe assorbito → Slasha e aspetta che
+    // svanisca (eccezione: se buca comunque, cioè il danno supera scudo + HP nemico → ffa, uccide).
+    if (nuke && zerk && enemyShielded && slash && (dmgOf(nuke) || 0) < enemyShield + ehp) {
+      S.pvp.note = 'hold Ragnarok (enemy shield ' + fmtDmg(enemyShield) + ')'; return { id: slash.id, tk: enemy.key };
+    }
     if (nuke && (!zerk || lowHp)) { S.pvp.note = nuke.name + '@full' + (zerk ? ' (lowHP heal)' : ''); return { id: nuke.id, tk: enemy.key }; }
     if (nuke && zerk && !lowHp && slash) { S.pvp.note = 'hold Ragnarok (HP ' + Math.round(myHpPct * 100) + '% > 50)'; return { id: slash.id, tk: enemy.key }; }
     // l'ultimate ESISTE ma non ho i token (tokens < costo) → Slash per RICARICARE token, NON bruciare
@@ -1682,7 +1694,7 @@ function pvpPick(state, myTurns) {
   //    Se non ho abbastanza token → continua a Slashare (gratis) per rigenerarli. Vale anche vs healer.
   // Solo IN FINESTRA (HP ≤ 55%): se sopra il 50% si conservano i token e si Slasha — non si imposta
   // la combo a vita alta perché il Ragnarok dopo non andrebbe comunque (lo si terrebbe, vedi step 3).
-  if (!atFull && zerk && comboWindow && rage >= max - 25 && warAuraSk && !shredUp && tokens >= comboCost) {
+  if (!atFull && zerk && comboWindow && !enemyShielded && rage >= max - 25 && warAuraSk && !shredUp && tokens >= comboCost) {
     S.pvp.note = 'war aura (combo setup)'; return { id: warAuraSk.id, tk: enemy.key };
   }
 
@@ -3159,7 +3171,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 Veyra Farm v1.63.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
+  log(`🔧 Veyra Farm v1.64.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
   dlog(`debug: exact 1/10/50 hits · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
