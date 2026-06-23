@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.62.0
+// @version      1.62.1
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1604,6 +1604,12 @@ function pvpPick(state, myTurns) {
   const myHpPct = meP.hp_max ? (meP.hp || 0) / meP.hp_max : 1;
   const lowHp = myHpPct <= 0.50;          // finestra Ragnarok (net-heal)
   const comboWindow = myHpPct <= 0.55;    // lead-in: War Aura il turno prima, così lo shred è su quando scendi sotto 50
+  // La strategia "conserva token + combo a vita bassa" è SPECIFICA del Berserker: solo RAGNAROK CLEAVE
+  // net-heala a HP basso (Blood Frenzy) e solo lui ha il setup War Aura. Le ALTRE classi (un amico che usa
+  // l'AutoPvP — Assassin/Mage/Magic Knight…) NON devono tenere l'ultimate per il low-HP: il loro nuke
+  // (Final Wish, Mana Collapse, Eclipse Sever…) va sparato a risorsa PIENA, subito. `zerk` separa i regimi.
+  const zerk = (nukeSk && /ragnarok/i.test(nukeSk.name || '')) ||
+               Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n));
 
   // RACE MODE — contro nemici VELOCI/bursty o che storicamente ti battono a DPS (`out-damaged`,
   // es. l'Assassino): NON rallentare con Slash (45k) come filler né sprecare turni in Ironclad.
@@ -1651,11 +1657,12 @@ function pvpPick(state, myTurns) {
   //    ancora nel DB, provalo per impararlo.
   if (atFull) {
     const nuke = usable.find(k => k.requires_full_resource);
-    // Ragnarok SOLO sotto il 50% HP (lì net-heala col lifesteal). Sopra il 50%: NON bruciarlo a vita
-    // alta (backlash 261k con poca cura) — Slasha, lascia ciclare la Rage e conserva i token finché
-    // non scendi in finestra. Il `lethal` (step 1) chiude comunque la partita a qualunque HP.
-    if (nuke && lowHp) { S.pvp.note = nuke.name + '@full (lowHP heal)'; return { id: nuke.id, tk: enemy.key }; }
-    if (nuke && !lowHp && slash) { S.pvp.note = 'hold Ragnarok (HP ' + Math.round(myHpPct * 100) + '% > 50)'; return { id: slash.id, tk: enemy.key }; }
+    // BERSERKER (zerk): Ragnarok SOLO sotto il 50% HP (lì net-heala col lifesteal). Sopra il 50%: NON
+    // bruciarlo a vita alta (backlash 261k con poca cura) — Slasha, lascia ciclare la Rage e conserva i
+    // token. ALTRE classi: il loro ultimate va a risorsa piena SUBITO (no hold). `lethal` (step 1) chiude
+    // comunque la partita a qualunque HP.
+    if (nuke && (!zerk || lowHp)) { S.pvp.note = nuke.name + '@full' + (zerk ? ' (lowHP heal)' : ''); return { id: nuke.id, tk: enemy.key }; }
+    if (nuke && zerk && !lowHp && slash) { S.pvp.note = 'hold Ragnarok (HP ' + Math.round(myHpPct * 100) + '% > 50)'; return { id: slash.id, tk: enemy.key }; }
     // l'ultimate ESISTE ma non ho i token (tokens < costo) → Slash per RICARICARE token, NON bruciare
     // la finestra su un mid-skill (la Rage si azzera comunque, al prossimo ciclo nuko coi token su).
     if (nukeSk && slash) { S.pvp.note = 'wait tokens (' + tokens + '/' + cost(nukeSk) + ')'; return { id: slash.id, tk: enemy.key }; }
@@ -1670,7 +1677,7 @@ function pvpPick(state, myTurns) {
   //    Se non ho abbastanza token → continua a Slashare (gratis) per rigenerarli. Vale anche vs healer.
   // Solo IN FINESTRA (HP ≤ 55%): se sopra il 50% si conservano i token e si Slasha — non si imposta
   // la combo a vita alta perché il Ragnarok dopo non andrebbe comunque (lo si terrebbe, vedi step 3).
-  if (!atFull && comboWindow && rage >= max - 25 && warAuraSk && !shredUp && haveNuke && tokens >= comboCost) {
+  if (!atFull && zerk && comboWindow && rage >= max - 25 && warAuraSk && !shredUp && tokens >= comboCost) {
     S.pvp.note = 'war aura (combo setup)'; return { id: warAuraSk.id, tk: enemy.key };
   }
 
@@ -1680,8 +1687,9 @@ function pvpPick(state, myTurns) {
   //     non ho difesa su (≈198k + GRANTS +41% def 2 turni): para il colpo e ti tiene vivo fino alla
   //     finestra <50% HP, e solo se restano i 21 token della combo. Altrimenti → Slash (conserva).
   //     FIX 2026-06-23 (export 110W/23L · strategia UANM): conserva token, sotto il 50% combo che net-heala.
-  //     Vedi reference-berserker-pvp-strategy. Le classi SENZA ultimate usano ancora il miglior colpo.
-  if (haveNuke) {
+  //     Vedi reference-berserker-pvp-strategy. SOLO Berserker (zerk): le ALTRE classi (e i build senza
+  //     ultimate) usano il miglior colpo affordable come filler — niente conservazione token.
+  if (zerk) {
     const threat = (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer;
     if (threat && ironclad && tokens - cost(ironclad) >= comboCost) {
       S.pvp.note = 'def-filler ' + ironclad.name; return { id: ironclad.id, tk: enemy.key };
@@ -1693,7 +1701,7 @@ function pvpPick(state, myTurns) {
 
   // 5) BUILD — Slash (gratis): ora solo FALLBACK, quando non posso permettermi un filler vero senza
   //    intaccare i 15 token riservati al Ragnarok. Carica Rage verso 100 e rigenera i token per la combo.
-  if (slash && haveNuke) { S.pvp.note = 'build (slash→combo)'; return { id: slash.id, tk: enemy.key }; }
+  if (slash && zerk) { S.pvp.note = 'build (slash→combo)'; return { id: slash.id, tk: enemy.key }; }
 
   // 6) FALLBACK (nessun nuke conosciuto/equipaggiato) → miglior colpo affordable, o Slash.
   const top = usable.filter(k => !k.requires_full_resource).sort((a, b) => (dmgOf(b) || 0) - (dmgOf(a) || 0))[0];
