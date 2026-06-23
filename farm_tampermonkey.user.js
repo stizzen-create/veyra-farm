@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.60.0
+// @version      1.61.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -1955,8 +1955,8 @@ async function mainLoop() {
     const idle = !_didWork && !questPending;
     let napMs;
     if (bossWatch)               napMs = DUNGEON_BOSS_POLL;
-    else if (stam < SKILL_COST){ status = '⏳ in attesa di stamina…';       renderUI(); napMs = 60_000; }
-    else if (idle)             { status = '✓ niente da farmare ora · attendo respawn'; renderUI(); napMs = 30_000; }
+    else if (stam < SKILL_COST){ status = '⏳ waiting for stamina…';           renderUI(); napMs = 60_000; }
+    else if (idle)             { status = '✓ nothing to farm now · waiting for respawn'; renderUI(); napMs = 30_000; }
     else                         napMs = 600;
     await sleep(napMs);
   }
@@ -2558,7 +2558,7 @@ function renderSettings() {
         <label style="color:#7df;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Farm: kill regular monsters (no potions)">
           <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
       if (farm) s += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
-      if (dgb)  s += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacca da solo appena la stanza apre (~3s, AFK) e si ferma <b>sotto</b> ${esc(fmtDmg(t.dmgTarget))} — mai oltre il limite gilda</div>`;
+      if (dgb)  s += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacks on its own the instant the room opens (~3s, AFK) and stops <b>below</b> ${esc(fmtDmg(t.dmgTarget))} — never over the guild limit</div>`;
       // "match name ⊇" — only attack monsters whose name CONTAINS one of these words.
       // For a multi-phase boss (Hermes: phase1 "Divine Herald", phase2 "Fleet Duelist",
       // phase3 "Ascended Herald") type the phase-only word — e.g. "ascended" — so the bot
@@ -2964,10 +2964,10 @@ function buildUI() {
     e.stopPropagation();
     const a = pb.dataset.pvpAction;
     if (a === 'toggle') {
-      S.pvp.enabled = !S.pvp.enabled; S.pvp.note = S.pvp.enabled ? 'avvio…' : 'off';
+      S.pvp.enabled = !S.pvp.enabled; S.pvp.note = S.pvp.enabled ? 'starting…' : 'off';
       if (S.pvp.enabled) _pvpUrlConsumed = false;    // ricomincia a leggere la URL del match
       save(); renderUI();
-      log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON' : 'OFF'}${S.pvp.enabled ? ' — il farm va in pausa' : ''}`, '#ff5c8a');
+      log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON' : 'OFF'}${S.pvp.enabled ? ' — farming pauses' : ''}`, '#ff5c8a');
     } else if (a === 'tokens') {
       pvpRefreshTokens(true);
     } else if (a === 'export') {
@@ -2979,8 +2979,8 @@ function buildUI() {
         document.body.appendChild(a2); a2.click(); a2.remove();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
         try { navigator.clipboard.writeText(txt); } catch {}   // best-effort copy too
-        log('⚔ PvP export → file scaricato: ' + a2.download, '#9cf');
-      } catch (e) { log('⚔ export fallito: ' + e.message, '#f88'); }
+        log('⚔ PvP export → file downloaded: ' + a2.download, '#9cf');
+      } catch (e) { log('⚔ export failed: ' + e.message, '#f88'); }
     } else if (a === 'survive') {
       S.pvp.survive = !!pb.checked; save();
     }
