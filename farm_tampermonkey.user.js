@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.65.0
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
+// @version      1.66.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -113,6 +113,7 @@ let WAVES = [];   // populated after S.config is initialized (see STATE section)
 const SK = 'veyra_mfarm_v1';
 const defState = () => ({
   kills: {}, attacks: 0, timers: {}, lspInv: null, potInv: {}, started: Date.now(),
+  expPer: {},               // exp-per-mob learned by diffing userExp across loots {name:{avg,n}} — drives the predictive harvest (wait+loot to LEVEL = free stamina, instead of a potion)
   timedKills: 0, timedBy: {}, lspUses: 0, hpHeals: 0, pos: null, config: null,
   debug: false,            // verbose scan/diagnostic log lines (off = clean, user-friendly log)
   farmSeen: {},            // name → last-seen ts: farm mobs we've encountered, so the
@@ -134,12 +135,10 @@ const defState = () => ({
   minimized: false,        // panel collapsed state — persists across page reloads
   dockPos: null,           // {left,top} of the minimized dock once dragged — persists
   _timedKillsPurged: false, // one-time: drop timed-boss names that leaked into Farming
-  // Hit style. OFF (default) = EXACT, minimal-overshoot: every fight composes tiers
-  // so it lands within ~1 small hit of the target (no stamina wasted — "danni precisi
-  // per tutto"). ON = proc-farming: fixed 50-stam Heroic hits for more Orryphos
-  // free-hit procs, but it overshoots small targets (e.g. ~19M on a 5M quest mob).
-  smallHits: false,
-  _exactMigrated: false,   // one-time flip of the old proc-farming default → exact
+  // Hit style is now AUTOMATIC by target type (no manual toggle): targets with a damage
+  // THRESHOLD/CAP — timed bosses, quests, guild-dungeon bosses — compose tiers EXACTLY
+  // (overshoot ≤ 1 stam, no wasted stamina/potions). Farm trash overshoots freely (more
+  // Orryphos procs). Hard cap: never use a tier above x100 (100 stam). See fightTarget.
   _farmLspMigrated: false, // one-time: farm targets drink LSP too (user request v1.18.0)
   // Pozioni stamina (LSP): i boss TIMED le usano SEMPRE (così non perdi una finestra di
   // spawn). Questo flag decide solo se ANCHE il FARM le usa:
@@ -176,10 +175,6 @@ const defState = () => ({
   // le mie skill, incl. l'effetto POTENZIATO a Rage piena). enabled=false → giochi a mano.
   pvp: {
     enabled: false,             // toggle ON/OFF (così puoi giocare a mano)
-    survive: true,              // brace: quando la risorsa NEMICA è piena (sta per nukeare), a Rage
-                                // piena usa una skill difensiva potenziata (Ironclad +DEF) invece del nuke.
-                                // NB: il Berserker a HP bassi fa più danno e cura di più → non ci si
-                                // difende per poca vita, solo per anticipare il nuke avversario.
     cur: null,                  // match_id in corso (guida il loop)
     tokensUsed: 0, wins: 0, losses: 0,
     lastPick: '', lastClass: '', note: '',
@@ -194,10 +189,9 @@ let S = (() => {
 })();
 // migrate older saved state so new fields always exist
 for (const [k, v] of Object.entries(defState())) if (S[k] === undefined) S[k] = v;
-// v1.16.0: minimal-overshoot is now the standard everywhere (user: "danni precisi per
-// tutto"). Flip the old proc-farming default OFF once on existing installs — the user
-// can still re-enable it from the ⚔️ toggle (it won't be flipped again).
-if (S._exactMigrated !== true) { S.smallHits = false; S._exactMigrated = true; }
+// v1.66.0: the hit-style toggle (smallHits) was removed — precision is now automatic by
+// target type (threshold/cap → exact, farm trash → free). Drop the dead field from old saves.
+delete S.smallHits; delete S._exactMigrated;
 // seed the editable wave config on first run (or if wiped)
 if (!Array.isArray(S.config) || !S.config.length) {
   S.config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -845,7 +839,7 @@ async function lootMob(idp) {
 // (wave card userdmg); false for dungeons (we don't know it → learn K on hit #2).
 // Returns { dmg, reason: 'done'|'dead'|'cap'|'nostam'|'interrupt' }.
 const SMALLEST = SKILLS[SKILLS.length - 1];   // 1-stamina Slash
-const PROC_MAX_STAM = 50;                     // proc-farming caps hits at 50 stam (Heroic)
+const MAX_TIER_STAM = 100;                    // HARD CAP: never use a tier above x100 (100 stam) — never the 200/1000-stam skills (user rule)
 
 async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null, timer = false, hardCap = false) {
   await join(idp);
@@ -893,20 +887,19 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
       if (!recovered && stam < 1 && (lsp === 'asNeeded' || lsp === 'once')) await useLSP(timer);
       if (stam < 1) { log(`out of stamina on ${label} (${stam})`, '#fa0'); return { dmg, reason: 'nostam' }; }
     }
-    // pick the attack tier:
+    // pick the attack tier (cap x100 = MAX_TIER_STAM in ALL cases, never 200/1000):
     //  • probe (K unknown) → 1 stam
-    //  • smallHits proc-farming → fixed medium hits ≤50 stam (Heroic), biggest
-    //    affordable; overshoot accepted (more Orryphos free-hit procs).
-    //  • EXACT (default, and forced for quests) → compose ONLY the 1/10/50-stam tiers
-    //    (Slash/Power/Heroic — NEVER 100/200/1000): the biggest of those that fits the
-    //    stamina AND won't overshoot the remaining gap, stepping 50→10→1 toward the
-    //    target so the final damage lands exactly on it (overshoot ≤ one 1-stam hit).
-    //    Capping at 50 (not 1000) ALSO maximises Orryphos procs: a 3B boss is ~154
-    //    Heroic hits = 154 proc chances, vs ~3 with the 1000-stam World Breaker.
+    //  • PRECISE (threshold/cap target — timed boss, quest, guild-dungeon: exact||timer||hardCap)
+    //    → biggest tier that fits the stamina AND won't overshoot the remaining gap, stepping
+    //    100→…→1 toward the target so the final damage lands exactly on it (overshoot ≤ 1 stam).
+    //    No wasted stamina/potions where a damage threshold matters.
+    //  • FARM TRASH (no threshold) → biggest affordable tier ≤ x100; overshoot accepted (more
+    //    Orryphos free-hit procs). Precision doesn't matter when you're just killing trash for loot.
+    const precise = exact || timer || hardCap;
     let tier;
-    if (!K)                         tier = SMALLEST;
-    else if (S.smallHits && !exact) tier = SKILLS.find(s => s.stam <= PROC_MAX_STAM && s.stam <= stam) || SMALLEST;
-    else                            tier = SKILLS.find(s => s.stam <= PROC_MAX_STAM && s.stam <= stam && s.stam * K <= remaining) || SMALLEST;
+    if (!K)            tier = SMALLEST;
+    else if (precise) tier = SKILLS.find(s => s.stam <= MAX_TIER_STAM && s.stam <= stam && s.stam * K <= remaining) || SMALLEST;
+    else              tier = SKILLS.find(s => s.stam <= MAX_TIER_STAM && s.stam <= stam) || SMALLEST;
 
     const before = dmg;
     const res = await attack(idp, tier.id, tier.stam);
@@ -943,16 +936,31 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
 
 // ── VARIANT B: harvest EXP before spending a stamina potion (farm only) ─────────
 // When a FARM target runs out of stamina we'd normally drink an LSP. Instead we first
-// LOOT every dead matching mob (free EXP, no stamina) and briefly WAIT for mobs that
-// are about to auto-die so we can loot them too. Leveling up refills stamina → potion
-// saved. Strictly BOUNDED so the farm never stalls for long:
-//   • only WAIT when the next death is within WAIT_LOOKAHEAD (otherwise loot now, return)
-//   • never wait more than HARVEST_WAIT_CAP in total
-// Returns true if stamina recovered (a level-up jump) → caller SKIPS the potion;
-// false → caller drinks the potion as fallback.
-const HARVEST_WAIT_CAP  = 120_000;  // max total wait per harvest (ms) — tune here
-const WAIT_LOOKAHEAD    = 45_000;   // only wait if a mob auto-dies within this window
+// LOOT every dead matching mob (free EXP, no stamina). PREDICTIVE: the bot knows how
+// much EXP it is from a level-up (userExpMax - userExp) and how much EXP each mob gives
+// (learned by diffing userExp across loots → S.expPer). So it computes whether looting
+// the mobs that are ABOUT TO AUTO-DIE will cross the level threshold → a level-up refills
+// stamina to full = potion saved. It WAITS only when the exp math says a level is actually
+// reachable within the time budget; otherwise it returns false at once and the caller
+// drinks. No more "drink, take 2 hits, then a mob dies and levels me up anyway" — the
+// level-up that was one dying mob away is now anticipated. Strictly bounded by HARVEST_WAIT_CAP.
+const HARVEST_WAIT_CAP  = 120_000;  // max total wait per harvest (ms)
 const HARVEST_MIN_STAM  = 500;      // stamina jump that counts as "leveled up / recovered"
+
+// learn exp-per-mob by diffing userExp; per-name average, global average as fallback
+function recordExpGain(name, gained) {
+  if (!name || !(gained > 0)) return;
+  const e = S.expPer[name] || { avg: 0, n: 0 };
+  e.avg = (e.avg * e.n + gained) / (e.n + 1); e.n++;
+  S.expPer[name] = e;
+}
+function expPerMob(name) {
+  const e = S.expPer[name];
+  if (e && e.n > 0) return e.avg;
+  const all = Object.values(S.expPer).filter(x => x.n > 0);   // fallback: mean of what we've learned
+  return all.length ? all.reduce((s, x) => s + x.avg, 0) / all.length : 0;
+}
+const gapToLevel = () => (userExpMax > 0 && userExp != null) ? Math.max(0, userExpMax - userExp) : Infinity;
 
 async function harvestWaveExp(wave, targets) {
   const farm = (targets || []).filter(t => !t.timer);
@@ -960,23 +968,36 @@ async function harvestWaveExp(wave, targets) {
   const stamStart = stam;
   const deadline  = Date.now() + HARVEST_WAIT_CAP;
   const looted    = new Set();
+  let   expPrev   = null;       // userExp at the previous fetch (for diff-learning)
+  let   pending   = [];         // mob names looted last round, awaiting exp attribution
 
   while (Date.now() < deadline && !paused && running) {
-    delete _waveCache[wave.url];                 // force a fresh read (stamina + dead mobs)
+    delete _waveCache[wave.url];                 // force a fresh read (stamina + EXP + dead mobs)
     const mobs = await fetchWave(wave.url, true);
 
+    // LEARN: attribute the EXP gained since the previous fetch to the batch looted then.
+    // Only when the bar went UP (a level-up RESETS it → skip) and the batch was homogeneous
+    // (single mob name → a clean per-name signal).
+    if (expPrev != null && userExp != null && userExp > expPrev && pending.length) {
+      const uniq = [...new Set(pending)];
+      if (uniq.length === 1) recordExpGain(uniq[0], (userExp - expPrev) / pending.length);
+    }
+    if (userExp != null) expPrev = userExp;
+
     // loot every dead matching farm mob not yet looted this harvest
+    const roundNames = [];
     for (const m of mobs.filter(x => x.dead)) {
       if (looted.has(m.id)) continue;
       const t = farm.find(ft => ft.match(m) && !isTimedName(m.name));
       if (!t) continue;
       const r = await lootMob({ monster_id: m.id });
-      looted.add(m.id);
+      looted.add(m.id); roundNames.push(m.name);
       if (r !== null && t.killLimit !== null) {
         S.kills[m.name] = (S.kills[m.name] || 0) + 1;
         log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}${lootSfx(r)}`, '#2f8');
       }
     }
+    pending = roundNames;
     save();
 
     // leveled up? stamina jumped → potion saved
@@ -985,15 +1006,32 @@ async function harvestWaveExp(wave, targets) {
       return true;
     }
 
-    // soonest auto-death among alive matching farm mobs
-    const now  = Math.floor(Date.now() / 1000);
-    const soon = mobs
-      .filter(m => !m.dead && m.expire > now && farm.some(t => t.match(m) && !isTimedName(m.name)))
-      .map(m => m.expire).sort((a, b) => a - b)[0];
-    if (!soon || (soon - now) * 1000 > WAIT_LOOKAHEAD) break;   // nothing dying soon → stop
-    const waitMs = Math.min((soon - now) * 1000 + 1500, deadline - Date.now(), 30_000);
+    // PREDICTIVE DECISION — will looting the soon-dying matching mobs reach the next level?
+    const now   = Math.floor(Date.now() / 1000);
+    const dying = mobs
+      .filter(m => !m.dead && m.expire > now && !looted.has(m.id)
+                   && farm.some(t => t.match(m) && !isTimedName(m.name)))
+      .sort((a, b) => a.expire - b.expire);
+    if (!dying.length) break;                    // nothing left to wait for → drink
+
+    const gap = gapToLevel();
+    let cum = 0, crossAt = -1;                    // accumulate expected exp in death order
+    for (let i = 0; i < dying.length; i++) {
+      cum += expPerMob(dying[i].name);
+      if (cum >= gap) { crossAt = i; break; }
+    }
+    if (crossAt < 0) {                            // even looting ALL of them won't level up → don't wait
+      log(`harvest: dying mobs ≈${fmtDmg(Math.round(cum))} exp < ${fmtDmg(Math.round(gap))} to level → no free stamina, drinking`, '#fa0');
+      break;
+    }
+    const crossExpire = dying[crossAt].expire;    // must wait until THIS mob has died
+    if ((crossExpire - now) * 1000 > deadline - Date.now()) {
+      log(`harvest: level-up mob dies in ${crossExpire - now}s > wait budget → drinking`, '#fa0');
+      break;
+    }
+    const waitMs = Math.min((dying[0].expire - now) * 1000 + 1500, deadline - Date.now(), 30_000);
     if (waitMs <= 0) break;
-    status = `⏳ ${Math.ceil(waitMs / 1000)}s → loot expiring mobs (save potion)`;
+    status = `⏳ ${Math.max(1, crossExpire - now)}s → loot ${crossAt + 1} mob(s) to LEVEL UP (save potion)`;
     renderUI();
     await sleep(waitMs);
   }
@@ -1639,14 +1677,16 @@ function pvpPick(state, myTurns) {
     S.pvp.note = 'opener ironclad'; return { id: ironclad.id, tk: enemy.key };
   }
 
-  // 2) BRACE — il nemico sta per nukare (Assassino → "Final Wish", il suo Ragnarok: risorsa piena +
-  //    token) e non ho DEF su → Ironclad per ASSORBIRE il nuke. Per i bursty scatta già al 75% (DEF su
-  //    in tempo). A Rage piena Ironclad è la 2-turni. Salto vs healer puro. Token permettendo.
-  //    In RACE mode NON bracciamo al 75% (regalerebbe la gara di DPS): paro SOLO quando la risorsa
-  //    nemica è davvero al 100% (Final Wish imminente) e non posso vincere lo scambio ora.
-  const braceNow = race ? (enemyResFull && tokens < cost(nukeSk || {})) : enemyNukeReady;
-  if (S.pvp.survive && braceNow && !haveDef && ironclad && !prof.healer && (prof.bursty || !prof.C)) {
-    S.pvp.note = 'brace(' + cls + ' nuke)'; return { id: ironclad.id, tk: enemy.key };
+  // 2) ANTI-NUKE (solo BERSERKER) — il vecchio brace Ironclad (+41% DEF) veniva PENETRATO dai nuker
+  //    veri (Assassin Death Mark 880k / MK Eclipse Sever 756k → vs Assassin 1W/8L, MK 2W/4L nell'export
+  //    2026-06-24). Sostituito da RAMPAGE HOWL a 100 Rage: consuma tutta la Rage per −40% danno SUBITO
+  //    per 2 turni (riduzione FLAT, non penetrabile) + colpisce 20x. Scatta SOLO a Rage piena (lì dà il
+  //    −40%) quando il nemico sta per nukare e non ho già difesa su. Salto vs healer. Ha priorità sul
+  //    Ragnarok (step 3): col nuke in arrivo si sopravvive, poi si punisce. Le ALTRE classi: nessuna
+  //    difesa anti-nuke per ora (TBD — non gestito in questa versione).
+  const rampage = usable.find(k => /rampage\s*howl/i.test(k.name || ''));
+  if (zerk && atFull && rampage && (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer) {
+    S.pvp.note = 'anti-nuke Rampage Howl (-40% 2t)'; return { id: rampage.id, tk: enemy.key };
   }
 
   // 3) RAGE PIENA → Ragnarok (la barra è use-it-or-lose-it). Se non ho i 15 token NON sprecare il
@@ -1911,10 +1951,7 @@ function renderPvp() {
     <div style="display:flex;gap:6px;margin-top:9px">
       <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 refresh tokens</button>
       <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ export DB</button>
-    </div>
-    <label style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px;color:#9ab;cursor:pointer">
-      <input type="checkbox" data-pvp-action="survive" ${p.survive ? 'checked' : ''}> brace for enemy nuke: when the opponent's resource is full (e.g. Assassin's burst), use Ironclad (+DEF) first to soften the incoming hit
-    </label>`;
+    </div>`;
 }
 
 async function mainLoop() {
@@ -2484,10 +2521,6 @@ function renderSettings() {
         '🧪 Stamina potions while farming',
         'Timed bosses AND farming use potions',
         'Only timed bosses use potions — farming runs on natural stamina');
-  h += toggleRow('smallhits', S.smallHits,
-        '⚔️ Hit style: small &amp; frequent',
-        'Many small hits (10–50 stamina) — more free-hit procs',
-        'Big exact hits — minimal overshoot on the damage target');
   h += toggleRow('questenable', S.questEnabled,
         '📜 Auto Adventurer&apos;s Guild quests',
         'Accept a quest → farm its mob on g5w9 (≥5m each) → turn in → next',
@@ -2742,7 +2775,6 @@ function wireSettings() {
 
   uiContent.onchange = e => {
     const el = e.target, a = el.dataset.act; if (!a) return;
-    if (a === 'smallhits')  { S.smallHits   = el.checked; save(); renderSettings(); return; }
     if (a === 'lspenable')  { S.lspEnabled  = el.checked; save(); renderSettings(); return; }
     if (a === 'questenable'){ S.questEnabled= el.checked; save(); renderSettings(); return; }
     if (a === 'debuglog')   { S.debug       = el.checked; save(); renderSettings(); return; }
@@ -3013,8 +3045,6 @@ function buildUI() {
         try { navigator.clipboard.writeText(txt); } catch {}   // best-effort copy too
         log('⚔ PvP export → file downloaded: ' + a2.download, '#9cf');
       } catch (e) { log('⚔ export failed: ' + e.message, '#f88'); }
-    } else if (a === 'survive') {
-      S.pvp.survive = !!pb.checked; save();
     }
   });
 
@@ -3157,7 +3187,7 @@ function init() {
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
   log(`🔧 Veyra Farm v1.64.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
-  dlog(`debug: exact 1/10/50 hits · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
+  dlog(`debug: precise tiers ≤x100 on threshold targets, free on farm trash · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
   try {
