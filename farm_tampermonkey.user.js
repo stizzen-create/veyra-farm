@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.66.0
+// @version      1.66.1
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -334,6 +334,13 @@ function parseHp(html) {
   const m = html.match(/(\d[\d,]+)\s*\/\s*(\d[\d,]+)\s*HP/);
   if (!m) return;
   const cur = parseInt(m[1].replace(/,/g, '')), mx = parseInt(m[2].replace(/,/g, ''));
+  // CRITICAL: the first "X / Y HP" on a BATTLE page is the BOSS's bar (e.g. 1.2B / 5.0B), NOT
+  // the player. Trusting it set userHpMax = boss HP → hpPct = (real 1.49M)/(5.0B) ≈ 0% → the bot
+  // drank an HP potion EVERY hit. Player HP/max come from the damage.php API (user_hp_after) and
+  // the heal response instead. Only trust this page bar once we KNOW the player's max and the
+  // parsed max is in range of it (rejects the boss bar). No trusted max yet → ignore (API seeds it).
+  if (!(userHpMax > 0)) return;
+  if (mx < userHpMax * 0.5 || mx > userHpMax * 2) return;   // out of range → it's the boss, skip
   if (Number.isFinite(cur)) userHp = cur;
   if (Number.isFinite(mx) && mx > 0) userHpMax = mx;
 }
@@ -502,7 +509,7 @@ async function useLSP(timer = false) {
 // Verified endpoint (same one veyra_colab uses). Returns {status, user_hp,
 // potions_remaining}. Called the moment a retaliation kills us so the bot keeps
 // fighting instead of sitting dead (which silently stalls ALL attacks).
-async function healUp() {
+async function healUp(dead = false) {
   if (hpEmpty) return false;
   const d = await post('user_heal_potion.php', { user_id: uid() });
   const ok = !!(d && (d.status === 'success' || /full hp/i.test(d.message || '')));
@@ -512,7 +519,7 @@ async function healUp() {
     S.hpHeals++; save();
     const left = d.potions_remaining ?? '?';
     if (left === 0 || left === '0') hpEmpty = true;
-    log(`💀→❤️ died: HP potion used (#${S.hpHeals}, left: ${left})`, '#f44');
+    log(`${dead ? '💀→❤️ died' : `🩹 HP ≤${S.hpHealPct}%`}: HP potion used (#${S.hpHeals}, left: ${left}) — HP now ${userHp}/${userHpMax}`, '#f44');
   } else {
     const msg = d?.message || 'no resp';
     if (/no potion|0 potion|don'?t have|out of/i.test(msg)) hpEmpty = true;
@@ -809,7 +816,7 @@ async function attack(idp, skillId = SKILL_ID, cost = SKILL_COST) {
   // fight loop / processWave skip out and wait for natural HP regen).
   if (/you are dead|you have died|you'?re dead/i.test(msg)) {
     userHp = 0;
-    if (S.hpHealPct > 0 && await healUp()) await join(idp);
+    if (S.hpHealPct > 0 && await healUp(true)) await join(idp);   // true = actual death (1 potion, then rejoin)
     return null;
   }
   if (msg.includes('Not enough stamina')) return null;
@@ -818,6 +825,9 @@ async function attack(idp, skillId = SKILL_ID, cost = SKILL_COST) {
   const ret = d.retaliation || {};
   if (ret.user_hp_after !== undefined) {
     userHp = Math.max(0, parseInt(ret.user_hp_after) || 0);
+    // learn the player's true MAX from the player's OWN HP (you start fights at/near full) — never
+    // the boss bar. This seeds userHpMax so the % threshold is correct; the heal response refines it.
+    if (userHp > (userHpMax || 0)) userHpMax = userHp;
     if (wantHeal()) { if (await healUp()) await join(idp); }
   }
   return d;
