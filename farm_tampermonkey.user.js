@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.64.0
+// @version      1.65.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · no wasted double-potion · potion toggle · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, survival brace), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -55,26 +55,11 @@ const SKILLS = [
 // thing can live in GM_setValue. makeMatch() rebuilds the predicate at runtime.
 //   include: [] → matches ANY mob; else name must contain one of these
 //   exclude: [] → matches everything not containing one of these
-const DEFAULT_CONFIG = [
-  { id:'g3w8', gate:3, wave:8, enabled:true, targets:[
-    { key:'drakzareth', label:'Drakzareth the Tyrant Lizard King',     include:['drakzareth'], exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
-    { key:'skarn',      label:'General Skarn the Radiant Bastion',     include:['skarn'],      exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
-    { key:'vessir',     label:'General Vessir the Sunfang Duelist',    include:['vessir'],     exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
-    { key:'hrazz',      label:'General Hrazz the Dawnflame Oathkeeper', include:['hrazz'],     exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
-  ]},
-  { id:'g5w9', gate:5, wave:9, enabled:true, targets:[
-    // Oceanus a 3B con pozioni (asNeeded) come i boss g3w8 — non droppa FSP ma lo vogliamo full.
-    { key:'oceanus',    label:'Oceanus the Water Titan',              include:['oceanus'],    exclude:[], dmgTarget:3_000_000_000,  killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
-  ]},
-  { id:'g5w10', gate:5, wave:10, enabled:true, targets:[
-    { key:'pan',        label:'Pan, Wild Herald of Hermes',           include:['pan'],        exclude:[],                 dmgTarget:120_000_000, killLimit:null, useLSP:'asNeeded', timer:true,  enabled:true },
-    { key:'g5w10-farm', label:'G5W10 Farm',                          include:[],             exclude:['pan','hermes'],   dmgTarget:100_000_000, killLimit:400,  useLSP:'asNeeded', timer:false, enabled:true },
-  ]},
-  { id:'g5w11', gate:5, wave:11, enabled:true, targets:[
-    { key:'orion',      label:'Orion, Eternal Hunter of Artemis',     include:['orion'],      exclude:[], dmgTarget:500_000_000, killLimit:null, useLSP:'asNeeded', timer:true, enabled:true },
-    { key:'g5w11-farm', label:'G5W11 Farm',                          include:[],             exclude:['orion','artemis'], dmgTarget:50_000_000, killLimit:400, useLSP:'asNeeded', timer:false, enabled:true },
-  ]},
-];
+// Ships EMPTY on purpose: a fresh install starts with NO targets so nobody
+// inherits someone else's farm setup. Add your own from the ⚙ Setup tab →
+// open a wave / boss / guild-dungeon page → "🔍 Scan this page" → tick the
+// monsters, set the stop-at damage and the mode (⏰ Timed / 🎯 Farm).
+const DEFAULT_CONFIG = [];
 
 function makeMatch(include = [], exclude = []) {
   const inc = include.map(s => String(s).toLowerCase().trim()).filter(Boolean);

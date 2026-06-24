@@ -12,13 +12,19 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
 
 | Status — live farming | ⚔ Auto‑PvP |
 |---|---|
-| ![Status panel](assets/panel-status.png) | ![Auto-PvP panel](assets/panel-pvp.png) |
+| ![Status panel](assets/panel-status.jpg) | ![Auto-PvP panel](assets/panel-pvp.jpg) |
 
-| Setup — pick your targets | Minimized dock (mobile‑friendly) |
+| Setup — pick your targets | Log — per‑hit trace |
 |---|---|
-| ![Setup panel](assets/panel-setup.png) | ![Dock](assets/panel-dock.png) |
+| ![Setup panel](assets/panel-setup.jpg) | ![Log panel](assets/panel-log.jpg) |
 
-*Top‑left: stamina, kills, lvl/hour, boss respawn timers, quests and per‑mob farm bars. Top‑right: Auto‑PvP — win‑rate, tokens, the per‑class skills it has learned. Bottom‑left: “Scan this page” and each target’s stop‑at damage / mode. Bottom‑right: the collapsed dock — tap the logo to open, tap ⏸/▶ to pause, drag it anywhere.*
+| Minimized dock (mobile‑friendly) | |
+|---|---|
+| ![Dock](assets/panel-dock.jpg) | |
+
+*Top‑left: stamina, kills, lvl/hour, boss respawn timers, quests and per‑mob farm bars. Top‑right: Auto‑PvP — win‑rate, tokens, the per‑class skills it has learned. Bottom: “Scan this page” and each target’s stop‑at damage / mode, the live per‑hit log, and the collapsed dock (tap the logo to open, tap ⏸/▶ to pause, drag it anywhere).*
+
+> 🆕 **Clean install.** The script ships with **no targets and no learned data** — every download starts blank. You pick your own bosses/farm mobs and the Auto‑PvP brain learns *your* enemies from scratch. Nothing of anyone else’s setup comes with it.
 
 ---
 
@@ -29,7 +35,7 @@ A **Tampermonkey userscript** that adds a draggable control panel to the browser
   - **guild‑dungeon bosses** (`battle.php?dgmid`)
   - **guild‑dungeon locations** (`guild_dungeon_location.php` — many instances, farmed by monster name). You can also scan the whole **instance overview** (`guild_dungeon_instance.php`) to add every zone at once, or a **cube dungeon** (`guild_dungeon_cube.php`) — it probes the instance and adds each PvE section + boss room.
   - **Adventurer’s Guild quests** — auto accept → farm the quest mob → turn in → next (respects the 2‑day rotation)
-- **⚔ Auto‑PvP** (solo ladder) — toggle it on and the bot self‑matchmakes, plays each turn data‑driven from a per‑enemy‑class DB it **learns** every match (including empowered full‑resource skills), runs a lethal check and a survival brace, and adapts (e.g. races fast/“out‑damaging” classes like Assassins instead of slow‑building). ⚠️ **Tuned for the Berserker kit only** — the skill‑selection logic is **hardcoded around the Berserker’s Rage skills** (Slash / Power Slash / Warrior Aura / Ironclad Strike / Ragnarok Cleave). On other advanced classes it may pick the wrong skills or fall back to weak hits, so **run Auto‑PvP on a Berserker** for now. (Enemy‑class reading and learning are generic; only *your* kit is assumed.)
+- **⚔ Auto‑PvP** (solo ladder) — toggle it on and the bot self‑matchmakes, plays each turn data‑driven from a per‑enemy‑class DB it **learns** every match (including empowered full‑resource skills), runs a lethal check and a survival brace, and adapts (e.g. races fast/“out‑damaging” classes like Assassins instead of slow‑building). **Works with any class — or none.** It reads your own kit at runtime: it fires your ultimate when your resource is full, otherwise plays your best affordable hit, and if you have no advanced class yet it just uses your basic attack. It starts knowing nothing and **learns as it fights**. *Note:* the most refined turn‑by‑turn tuning (token conservation + a low‑HP combo) is specific to the **Berserker’s Rage kit**, so a Berserker squeezes the most out of it; every other class still plays a solid generic game and improves as the DB fills.
 - **Exact‑damage hits** — composes 1 / 10 / 50‑stamina attack tiers to land within one small hit of your target (minimal overshoot), which also maximizes per‑hit proc chances.
 - **Per‑target “match name” filter** — attack only the right boss phase (e.g. fight *Hermes phase 3* by matching `ascended`), so multi‑phase fights aren’t started early.
 - **Auto‑loot** every dead mob it’s responsible for, **auto‑heal** on death, and smart **stamina‑potion** use (only when truly out of stamina, and only the potions you allow — it spends **LSP** and never touches your **FSP** stash).
