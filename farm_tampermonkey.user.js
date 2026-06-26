@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.66.1
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand
+// @version      1.67.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -181,6 +181,10 @@ const defState = () => ({
     tokensAvail: null, tokensCheckedAt: 0, gems: null, refillCost: 500, freeChance: null,  // letti da pvp.php
     matches: [],                // {mid, enemyClass, winner}
     db: { classes: {}, my: {} },// il DB che cresce a ogni match
+    // SCOUT: impara TUTTE le classi leggendo i log delle battaglie recenti di ALTRI giocatori
+    // (pvp.php → Recent Solo Battles → pvp_battle_state.php?match_id=). Riempie db.classes
+    // (skill/danno/effetti/profilo) senza dover combattere ogni classe di persona.
+    scout: { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null },
   },
 });
 let S = (() => {
@@ -189,6 +193,8 @@ let S = (() => {
 })();
 // migrate older saved state so new fields always exist
 for (const [k, v] of Object.entries(defState())) if (S[k] === undefined) S[k] = v;
+// v1.67.0: ensure the PvP scout sub-state exists on saves from before scouting landed.
+if (S.pvp && !S.pvp.scout) S.pvp.scout = { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null };
 // v1.66.0: the hit-style toggle (smallHits) was removed — precision is now automatic by
 // target type (threshold/cap → exact, farm trash → free). Drop the dead field from old saves.
 delete S.smallHits; delete S._exactMigrated;
@@ -1584,6 +1590,98 @@ function pvpLearn(mid, state, logs, rageBefore) {
   }
 }
 
+// SCOUT — impara da un match di ALTRI giocatori (pvp_battle_state.php?match_id=X). Qui NESSUN
+// lato è "me": ogni lato è una classe da catalogare. Mappo actor.side → classe di quel lato e
+// registro skill/danno/effetti/bigHit/cure in db.classes[cls] (MAI in db.my). Così il DB cresce
+// su TUTTE le classi (anche quelle mai affrontate), pronto per pvpProfile/pvpPick.
+function pvpScoutLearn(mid, state) {
+  const db = S.pvp.db;
+  const allyU  = Object.values(state.teams?.ally?.players_by_num  || {})[0];
+  const enemyU = Object.values(state.teams?.enemy?.players_by_num || {})[0];
+  const uOf = side => (side === 'ally' ? allyU : enemyU);
+  let n = 0;
+  for (const l of (state.new_logs || state.logs || [])) {
+    const key = 'sc:' + mid + ':' + l.id; if (_pvpSeen[key]) continue; _pvpSeen[key] = 1;
+    const d = l.details; if (!d || !d.skill || !d.actor) continue;
+    const U = uOf(d.actor.side); const cls = U?.advanced_class_name;
+    if (!cls || cls === 'Unknown') continue;
+    const dmg  = (d.target?.hp_before || 0) - (d.target?.hp_after || 0);   // >0 danno · <0 cura
+    const self = (d.actor?.hp_before  || 0) - (d.actor?.hp_after  || 0);   // backlash a chi colpisce
+    const C = db.classes[cls] = db.classes[cls] || { class: cls, resource: U.advanced_resource_name, skills: {}, effects: {}, notes: {}, matches: 0, losses: 0, dmgToMe: 0, healed: 0, bigHit: { dmg: 0, skill: '' } };
+    const sk = C.skills[d.skill.name] = C.skills[d.skill.name] || { id: d.skill.id, cost: d.skill.cost, maxDmg: 0, retaliationToMe: 0 };
+    if (d.skill.id   != null) sk.id   = d.skill.id;
+    if (d.skill.cost != null) sk.cost = d.skill.cost;
+    if (dmg  > sk.maxDmg)          sk.maxDmg = dmg;
+    if (self > (sk.selfDmg || 0))  sk.selfDmg = self;          // costo-HP della skill (es. ultimate backlash)
+    if (d.formula?.attack_notes)  C.notes.attack  = d.formula.attack_notes;
+    if (d.formula?.defense_notes) C.notes.defense = d.formula.defense_notes;
+    if (dmg > 0 && dmg > (C.bigHit?.dmg || 0)) C.bigHit = { dmg, skill: d.skill.name };  // colpo più forte visto
+    if (dmg < 0) C.healed = (C.healed || 0) + (-dmg);          // cura erogata da questa classe
+    C.scoutSamples = (C.scoutSamples || 0) + 1;
+    n++;
+  }
+  // effetti attivi visti su entrambi i giocatori (buff/debuff per classe)
+  for (const U of [allyU, enemyU]) {
+    const cls = U && U.advanced_class_name; if (!cls || cls === 'Unknown') continue;
+    const C = db.classes[cls]; if (!C) continue;
+    for (const e of (U.effects || [])) { const nm = e.name || e.label || e.id; if (nm) C.effects[nm] = e; }
+  }
+  return n;
+}
+
+// gira quando l'AutoPvP è idle (tra un match e l'altro, o anche da spento se lo scout è ON).
+// VERIFICATO 2026-06-27 via chrome-devtools: pvp_battle_state.php?match_id=X NON è participant-gated
+// → ritorna il log JSON COMPLETO di QUALSIASI match (anche di altri giocatori); gli ID sono ~sequenziali.
+// Strategia: (1) impara i match RECENTI nuovi della lobby (avversari freschi), (2) CAMMINA A RITROSO sugli
+// ID per minare le battaglie di TUTTI → copre ogni classe senza doverla combattere. Gli ID nella lobby
+// "Recent Solo Battles" sono nel markup `<strong>Match:</strong> <span>#NNN</span>`. Throttle ~90s, max
+// 6 match/giro per non saturare il rate-limit. Match troppo vecchi/di altre stagioni → 400 (saltati).
+let _pvpScoutTs = 0, _pvpScoutBusy = false;
+async function pvpScout(force) {
+  const sc = S.pvp.scout; if (!sc || !sc.enabled) return;
+  if (_pvpScoutBusy) return;
+  if (!force && Date.now() - _pvpScoutTs < 90000) return;
+  _pvpScoutTs = Date.now(); _pvpScoutBusy = true;
+  try {
+    const html = await getHtml(`${BASE}/pvp.php`);
+    if (!html) return;
+    const recent = [...new Set([
+      ...[...html.matchAll(/Match:\s*<\/strong>\s*<span>\s*#?\s*(\d+)/gi)].map(m => m[1]),
+      ...[...html.matchAll(/pvp_battle\.php\?match_id=(\d+)/gi)].map(m => m[1]),   // fallback se il markup cambia
+    ])];
+    const head = recent.reduce((a, b) => Math.max(a, +b), 0);
+    if (head && !sc.cursor) sc.cursor = head;            // primo avvio: parti dagli ID più recenti
+    const learnOne = async (id) => {
+      const st = await pvpState(id); sc.seenMids.push(id);
+      if (st && st.match && (st.new_logs || st.logs)) return pvpScoutLearn(id, st);
+      return 0;
+    };
+    let learned = 0, done = 0;
+    // 1) match recenti NUOVI (gli avversari appena affrontati nella lobby)
+    for (const id of recent.filter(x => !sc.seenMids.includes(x))) {
+      if (done >= 4) break;                              // riserva slot al walk-back
+      learned += await learnOne(id); done++; await sleep(450);
+    }
+    // 2) WALK-BACK dal cursore: mina le battaglie di TUTTI i giocatori (tutte le classi)
+    let cur = sc.cursor || head, miss = 0;
+    while (done < 6 && cur > 1) {
+      const id = String(cur); cur--;
+      if (sc.seenMids.includes(id)) continue;
+      const got = await learnOne(id);
+      if (got) { learned += got; miss = 0; }
+      else if (++miss >= 3) { cur = head; break; }       // sotto il floor stagione (tanti 400) → riparti dai recenti
+      done++; await sleep(450);
+    }
+    sc.cursor = cur;                                     // prossimo punto del walk-back (persiste)
+    if (sc.seenMids.length > 2000) sc.seenMids = sc.seenMids.slice(-1500);
+    sc.lastRun = Date.now(); sc.learned = (sc.learned || 0) + learned;
+    S.pvp.note = `📚 scout +${learned} log · ${Object.keys(S.pvp.db.classes || {}).length} classi`;
+    save();
+    if (activeTab === 'pvp') renderUI();
+  } catch (e) { /* scout silenzioso: non deve mai rompere il loop di gioco */ }
+  finally { _pvpScoutBusy = false; }
+}
+
 // scelta adattiva della skill — "quale e quando". Usa il danno IMPARATO nel db, il nuke a
 // Rage piena, la consapevolezza della classe (curatori → burst) e una regola di sopravvivenza
 // (HP basso a Rage piena → skill difensiva potenziata invece del nuke).
@@ -1681,6 +1779,15 @@ function pvpPick(state, myTurns) {
   const lethal = usable.filter(k => (dmgOf(k) || 0) >= ehp).sort((a, b) => cost(a) - cost(b))[0];
   if (lethal) { S.pvp.note = 'lethal ' + lethal.name; return { id: lethal.id, tk: enemy.key }; }
 
+  // 1b) AUTO-CURA (classi NON-Berserker, es. amici su Saint/Paladin/Inquisitor) — sotto il 35% HP e
+  //     senza colpo letale pronto, lancia la cura affordable più forte invece di subire. Il Berserker
+  //     net-heala già col Ragnarok (zerk), quindi è escluso. `usable` ha solo gli attacchi → cerco in skills.
+  if (!zerk && myHpPct <= 0.35) {
+    const healSk = skills.find(k => /\b(heal|recover|mercy|mend)\b/i.test(k.name || '')
+      && tokens >= cost(k) && (!k.requires_full_resource || atFull));
+    if (healSk) { S.pvp.note = 'self-heal ' + healSk.name; return { id: healSk.id, tk: (meP.key || enemy.key) }; }
+  }
+
   // 0) APERTURA — primo mio turno: Ironclad per reggere il nuke d'apertura (molti partono a risorsa
   //    piena e nukano subito). Ho 40 token a inizio match → Ironclad è sempre affordable al turno 1.
   if ((myTurns || 0) === 0 && ironclad && !haveDef && !race) {
@@ -1697,6 +1804,12 @@ function pvpPick(state, myTurns) {
   const rampage = usable.find(k => /rampage\s*howl/i.test(k.name || ''));
   if (zerk && atFull && rampage && (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer) {
     S.pvp.note = 'anti-nuke Rampage Howl (-40% 2t)'; return { id: rampage.id, tk: enemy.key };
+  }
+  // 2b) ANTI-NUKE GENERICO (classi NON-Berserker) — il buco "TBD" lasciato sopra: se il nemico sta per
+  //     nukare e non ho difesa su, alzo lo scudo/guard affordable più forte (Ironclad o equivalente)
+  //     invece di mangiarmi il burst. Salto vs healer (non nukano) e se sono già coperto.
+  if (!zerk && ironclad && (enemyNukeReady || enemyResFull) && !haveDef && !prof.healer) {
+    S.pvp.note = 'anti-nuke ' + ironclad.name; return { id: ironclad.id, tk: enemy.key };
   }
 
   // 3) RAGE PIENA → Ragnarok (la barra è use-it-or-lose-it). Se non ho i 15 token NON sprecare il
@@ -1788,6 +1901,25 @@ function pvpEndMatch(state) {
   log(`⚔ PvP ${win ? 'WIN' : 'LOSS'} vs ${cls}${prof.healer ? ' (healer)' : ''}${prof.bursty ? ' (nuker)' : ''} · ${reason} · myDmg ${fmtDmg(st.myDmg)} / theirHeal ${fmtDmg(st.enemyHeal)} / theirBig ${fmtDmg(st.enemyBig)} · 🎟 tokens me ${st.myTokens||0} / enemy ${st.enemyTokens||0} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
 }
 
+// RESET del record PvP. `full=false` (default, "nuova stagione"): azzera SOLO il record — W/L,
+// token spesi, lista match e i contatori per-classe (matches/losses/lossReasons/lastLoss) — ma
+// MANTIENE le classi imparate (skill/danno/effetti), così il bot non riparte cieco a stagione nuova.
+// `full=true`: cancella anche tutta la conoscenza (db) e la cronologia scout. Vedi pulsante nel tab.
+function resetPvpRecord(full) {
+  const p = S.pvp;
+  p.wins = 0; p.losses = 0; p.tokensUsed = 0; p.matches = [];
+  for (const C of Object.values(p.db.classes || {})) {
+    C.matches = 0; C.losses = 0; C.lossReasons = {}; delete C.lastLoss;
+  }
+  if (full) {
+    p.db = { classes: {}, my: {} };
+    if (p.scout) { p.scout.seenMids = []; p.scout.learned = 0; p.scout.lastRun = 0; p.scout.cursor = null; }
+  }
+  save(); renderUI();
+  log(full ? '⚔ PvP: DB + record AZZERATI (full wipe)'
+           : '⚔ PvP: record stagione azzerato (classi imparate mantenute)', '#9cf');
+}
+
 // build a HUMAN-READABLE .txt report (per-class W/L + loss reasons + their big hit),
 // with the raw JSON appended at the bottom for deep analysis. Used by the export button.
 function pvpExportText() {
@@ -1829,9 +1961,10 @@ function pvpExportText() {
 async function pvpLoop() {
   while (running) {
     // anche da spento aggiorna i token ogni tanto, così il tab li mostra (throttle 60s)
-    if (!S.pvp.enabled || paused) { await pvpRefreshTokens(); await sleep(2000); continue; }
+    if (!S.pvp.enabled || paused) { await pvpRefreshTokens(); if (!paused) await pvpScout(); await sleep(2000); continue; }
     try {
       await pvpRefreshTokens();   // tieni il conteggio token fresco mentre gioca
+      if (!S.pvp.cur) await pvpScout();   // tra un match e l'altro: impara dalle battaglie recenti (throttled)
       // riprendi un match già aperto dalla URL della battle page (una sola volta), poi matchmake
       if (!S.pvp.cur && !_pvpUrlConsumed) {
         const m = location.pathname.includes('pvp_battle.php') && new URL(location.href).searchParams.get('match_id');
@@ -1904,6 +2037,8 @@ function pvpTabRefresh() { if (activeTab === 'pvp') renderUI(); }
 // the ⚔ PvP tab body — ON/OFF + all match stats + tokens
 function renderPvp() {
   const p = S.pvp;
+  const sc = p.scout || (p.scout = { enabled: true, seenMids: [], lastRun: 0, learned: 0 });
+  const scAge = sc.lastRun ? fmt(Date.now() - sc.lastRun) + ' ago' : 'mai';
   const total = p.wins + p.losses;
   const wr = total ? Math.round(p.wins / total * 100) : 0;
   const tokAge = p.tokensCheckedAt ? fmt(Date.now() - p.tokensCheckedAt) + ' ago' : 'never';
@@ -1954,13 +2089,24 @@ function renderPvp() {
     <div style="font-size:11px;margin-bottom:3px">🆚 now: <b>${esc(p.lastClass || '—')}</b> · 🎯 <b>${esc(p.lastPick || '—')}</b></div>
 
     <div style="border-top:1px solid #2a2a44;margin:6px 0;padding-top:6px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:5px">
+      <div style="font-size:11px;color:${sc.enabled ? '#7df' : '#888'}">📡 Scout
+        <span style="color:#9ab">+${(sc.learned||0).toLocaleString()} log · ${sc.seenMids.length} match · ${scAge}</span></div>
+      <button data-pvp-action="scout" style="background:${sc.enabled ? '#1f5a7a' : '#3a2a2a'};color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px">${sc.enabled ? '📡 ON' : '📡 OFF'}</button>
+    </div>
+    <div style="color:#667;font-size:10px;margin:-3px 0 7px">legge i log delle battaglie recenti di TUTTI i giocatori (anche da AutoPvP spento) → impara skill/danno/effetti di ogni classe senza doverla combattere.</div>
+
     <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classes learned (${Object.keys(p.db.classes||{}).length})
       <span style="color:#667;font-weight:normal;font-size:10px">· 💚 healer 💥 nuker · W/L · skills · effects</span></div>
-    ${rows || '<div style="color:#667;font-size:11px">none yet — start it or play a match</div>'}
+    ${rows || '<div style="color:#667;font-size:11px">none yet — start it, play a match, or let the scout run</div>'}
 
     <div style="display:flex;gap:6px;margin-top:9px">
-      <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 refresh tokens</button>
-      <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ export DB</button>
+      <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 tokens</button>
+      <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ export</button>
+      <button data-pvp-action="reset" title="azzera SOLO il record (W/L) della stagione — mantiene le classi imparate" style="flex:1;background:#3a2f1a;color:#fc8;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🆕 reset record</button>
+    </div>
+    <div style="margin-top:5px">
+      <button data-pvp-action="wipe" title="CANCELLA TUTTO: record + classi imparate + storico scout" style="width:100%;background:#3a2020;color:#f99;border:none;border-radius:4px;padding:3px 6px;cursor:pointer;font-size:10px">🗑 full wipe (record + DB imparato)</button>
     </div>`;
 }
 
@@ -3044,6 +3190,14 @@ function buildUI() {
       log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON' : 'OFF'}${S.pvp.enabled ? ' — farming pauses' : ''}`, '#ff5c8a');
     } else if (a === 'tokens') {
       pvpRefreshTokens(true);
+    } else if (a === 'scout') {
+      S.pvp.scout.enabled = !S.pvp.scout.enabled; save(); renderUI();
+      log(`📡 PvP Scout ${S.pvp.scout.enabled ? 'ON — impara dalle battaglie recenti' : 'OFF'}`, '#7df');
+      if (S.pvp.scout.enabled) pvpScout(true);   // primo giro subito
+    } else if (a === 'reset') {
+      resetPvpRecord(false);
+    } else if (a === 'wipe') {
+      resetPvpRecord(true);
     } else if (a === 'export') {
       try {
         const txt = pvpExportText();
