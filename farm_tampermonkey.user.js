@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.67.0
+// @version      1.67.1
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -185,6 +185,7 @@ const defState = () => ({
     // (pvp.php → Recent Solo Battles → pvp_battle_state.php?match_id=). Riempie db.classes
     // (skill/danno/effetti/profilo) senza dover combattere ogni classe di persona.
     scout: { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null },
+    defSeen: [],                // match_id delle DIFESE già conteggiate nel record (il bot non le gioca)
   },
 });
 let S = (() => {
@@ -195,6 +196,7 @@ let S = (() => {
 for (const [k, v] of Object.entries(defState())) if (S[k] === undefined) S[k] = v;
 // v1.67.0: ensure the PvP scout sub-state exists on saves from before scouting landed.
 if (S.pvp && !S.pvp.scout) S.pvp.scout = { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null };
+if (S.pvp && !Array.isArray(S.pvp.defSeen)) S.pvp.defSeen = [];
 // v1.66.0: the hit-style toggle (smallHits) was removed — precision is now automatic by
 // target type (threshold/cap → exact, farm trash → free). Drop the dead field from old saves.
 delete S.smallHits; delete S._exactMigrated;
@@ -1254,7 +1256,7 @@ async function processDungeonLocation(src) {
         if (t.killLimit !== null) S.kills[m.name] = (S.kills[m.name] || 0) + 1;
         const kc   = t.killLimit !== null ? ` · kill #${S.kills[m.name]}` : '';
         const loot = fmtLoot(r);
-        log(`💰 loot 🏰 ${m.name}${kc}${loot ? ` → ${loot}` : ' (vuoto)'}`, '#ffd54a');
+        log(`💰 loot 🏰 ${m.name}${kc}${loot ? ` → ${loot}` : ' (empty)'}`, '#ffd54a');
       }
       break;   // one target claims it
     }
@@ -1645,6 +1647,7 @@ async function pvpScout(force) {
   try {
     const html = await getHtml(`${BASE}/pvp.php`);
     if (!html) return;
+    await pvpSyncDefenses(html);   // conta nel record anche le difese (match che il bot non gioca)
     const recent = [...new Set([
       ...[...html.matchAll(/Match:\s*<\/strong>\s*<span>\s*#?\s*(\d+)/gi)].map(m => m[1]),
       ...[...html.matchAll(/pvp_battle\.php\?match_id=(\d+)/gi)].map(m => m[1]),   // fallback se il markup cambia
@@ -1675,11 +1678,46 @@ async function pvpScout(force) {
     sc.cursor = cur;                                     // prossimo punto del walk-back (persiste)
     if (sc.seenMids.length > 2000) sc.seenMids = sc.seenMids.slice(-1500);
     sc.lastRun = Date.now(); sc.learned = (sc.learned || 0) + learned;
-    S.pvp.note = `📚 scout +${learned} log · ${Object.keys(S.pvp.db.classes || {}).length} classi`;
+    S.pvp.note = `📚 scout +${learned} logs · ${Object.keys(S.pvp.db.classes || {}).length} classes`;
     save();
     if (activeTab === 'pvp') renderUI();
   } catch (e) { /* scout silenzioso: non deve mai rompere il loop di gioco */ }
   finally { _pvpScoutBusy = false; }
+}
+
+// conta nel record anche le DIFESE (i match in cui un altro giocatore ATTACCA me: il bot non li
+// gioca, quindi pvpEndMatch li perde). Legge la lista "Recent Solo Battles" della lobby
+// ("You defended - Won/Lost" + "Match: #N"), e per ogni difesa NUOVA scarica il log e ricava il
+// risultato in modo affidabile (`win = match.winner_side === viewer.side`) + la classe avversaria
+// (il lato opposto al viewer) → aggiorna W/L e il record per-classe. Dedup via S.pvp.defSeen.
+// Gli ATTACchi sono saltati (li conta già pvpEndMatch). Vedi pvpScout per il markup.
+async function pvpSyncDefenses(html) {
+  const p = S.pvp;
+  if (!Array.isArray(p.defSeen)) p.defSeen = [];
+  const re = /You\s+(attacked|defended)\s*-\s*(Won|Lost)[\s\S]{0,400}?Match:\s*<\/strong>\s*<span>\s*#?\s*(\d+)/gi;
+  const defs = [...html.matchAll(re)].filter(m => m[1].toLowerCase() === 'defended').map(m => m[3]);
+  let added = 0;
+  for (const mid of defs) {
+    if (p.defSeen.includes(mid)) continue;
+    p.defSeen.push(mid);                    // segna SUBITO: anche se il fetch fallisce non riconta all'infinito
+    const st = await pvpState(mid);
+    if (!st || !st.match) continue;
+    const win = !!(st.match.winner_side && st.viewer && st.match.winner_side === st.viewer.side);
+    if (win) p.wins++; else p.losses++;
+    const oppSide = st.viewer?.side === 'ally' ? 'enemy' : 'ally';   // l'avversario = lato opposto a me
+    const cls = Object.values(st.teams?.[oppSide]?.players_by_num || {})[0]?.advanced_class_name || '?';
+    p.matches.push({ mid, enemyClass: cls, winner: win ? 'ally' : 'enemy', reason: win ? 'won' : 'def loss', role: 'defended' });
+    const C = p.db.classes[cls];
+    if (C) { C.matches = (C.matches || 0) + 1; if (!win) { C.losses = (C.losses || 0) + 1; C.lastLoss = 'def loss'; C.lossReasons = C.lossReasons || {}; C.lossReasons['def loss'] = (C.lossReasons['def loss'] || 0) + 1; } }
+    pvpScoutLearn(mid, st);                 // impara anche le skill di questa difesa
+    if (!p.scout.seenMids.includes(mid)) p.scout.seenMids.push(mid);
+    added++;
+    await sleep(450);
+  }
+  if (p.matches.length > 200) p.matches.splice(0, p.matches.length - 200);
+  if (p.defSeen.length > 400) p.defSeen = p.defSeen.slice(-300);
+  if (added) { save(); log(`⚔ PvP: +${added} defenses from lobby → ${p.wins}W/${p.losses}L`, '#9cf'); if (activeTab === 'pvp') renderUI(); }
+  return added;
 }
 
 // scelta adattiva della skill — "quale e quando". Usa il danno IMPARATO nel db, il nuke a
@@ -1914,10 +1952,11 @@ function resetPvpRecord(full) {
   if (full) {
     p.db = { classes: {}, my: {} };
     if (p.scout) { p.scout.seenMids = []; p.scout.learned = 0; p.scout.lastRun = 0; p.scout.cursor = null; }
+    p.defSeen = [];
   }
   save(); renderUI();
-  log(full ? '⚔ PvP: DB + record AZZERATI (full wipe)'
-           : '⚔ PvP: record stagione azzerato (classi imparate mantenute)', '#9cf');
+  log(full ? '⚔ PvP: DB + record fully WIPED'
+           : '⚔ PvP: season record reset (learned classes kept)', '#9cf');
 }
 
 // build a HUMAN-READABLE .txt report (per-class W/L + loss reasons + their big hit),
@@ -2052,10 +2091,10 @@ function renderPvp() {
     const prof = pvpProfile(c.class);
     const tag = (prof.healer ? '💚' : '') + (prof.bursty ? '💥' : '');
     const nSk = Object.keys(c.skills || {}).length, nEf = Object.keys(c.effects || {}).length;
-    return `<div style="font-size:11px;padding:1px 0">
+    return `<div style="font-size:11px;padding:1px 0" title="${esc(c.class||'?')}: ${w} wins / ${l} losses · ${nSk} skills learned · ${nEf} status effects seen">
       <div style="display:flex;justify-content:space-between">
         <span style="color:#cda">${esc(c.class || '?')} ${tag}</span>
-        <span style="color:#778">${w}/${l} · ${nSk}sk ${nEf}fx</span></div>
+        <span style="color:#778">${w}W/${l}L · ${nSk} skills · ${nEf} fx</span></div>
       ${c.lastLoss ? `<div style="color:#a88;font-size:10px;padding-left:8px">↳ last loss: ${esc(c.lastLoss)}</div>` : ''}</div>`;
   }).join('');
   const recent = (p.matches || []).slice(-6).reverse().map(m =>
@@ -2094,7 +2133,7 @@ function renderPvp() {
         <span style="color:#9ab">+${(sc.learned||0).toLocaleString()} log · ${sc.seenMids.length} match · ${scAge}</span></div>
       <button data-pvp-action="scout" style="background:${sc.enabled ? '#1f5a7a' : '#3a2a2a'};color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px">${sc.enabled ? '📡 ON' : '📡 OFF'}</button>
     </div>
-    <div style="color:#667;font-size:10px;margin:-3px 0 7px">legge i log delle battaglie recenti di TUTTI i giocatori (anche da AutoPvP spento) → impara skill/danno/effetti di ogni classe senza doverla combattere.</div>
+    <div style="color:#667;font-size:10px;margin:-3px 0 7px">reads the logs of ALL players' recent battles (even while AutoPvP is OFF) → learns each class's skills/damage/effects without having to fight them.</div>
 
     <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classes learned (${Object.keys(p.db.classes||{}).length})
       <span style="color:#667;font-weight:normal;font-size:10px">· 💚 healer 💥 nuker · W/L · skills · effects</span></div>
@@ -2103,10 +2142,10 @@ function renderPvp() {
     <div style="display:flex;gap:6px;margin-top:9px">
       <button data-pvp-action="tokens" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🔄 tokens</button>
       <button data-pvp-action="export" style="flex:1;background:#252540;color:#ccc;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">⬇ export</button>
-      <button data-pvp-action="reset" title="azzera SOLO il record (W/L) della stagione — mantiene le classi imparate" style="flex:1;background:#3a2f1a;color:#fc8;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🆕 reset record</button>
+      <button data-pvp-action="reset" title="reset ONLY the season W/L record — keeps the learned classes" style="flex:1;background:#3a2f1a;color:#fc8;border:none;border-radius:4px;padding:4px 6px;cursor:pointer;font-size:10px">🆕 reset record</button>
     </div>
     <div style="margin-top:5px">
-      <button data-pvp-action="wipe" title="CANCELLA TUTTO: record + classi imparate + storico scout" style="width:100%;background:#3a2020;color:#f99;border:none;border-radius:4px;padding:3px 6px;cursor:pointer;font-size:10px">🗑 full wipe (record + DB imparato)</button>
+      <button data-pvp-action="wipe" title="WIPE EVERYTHING: record + learned classes + scout history" style="width:100%;background:#3a2020;color:#f99;border:none;border-radius:4px;padding:3px 6px;cursor:pointer;font-size:10px">🗑 full wipe (record + learned DB)</button>
     </div>`;
 }
 
@@ -3007,7 +3046,7 @@ function resetStats() {
   S.lvlBaseFrac = null; S.lvlBaseTs = null;   // re-baseline the lvl/hour average
   save();
   noteLevelProgress();   // immediately re-seed from the current reading if we have one
-  log('🗑 statistiche superiori azzerate (mob farmati mantenuti)', '#9cf');
+  log('🗑 top stats reset (farmed monsters kept)', '#9cf');
   renderUI();
 }
 
@@ -3019,7 +3058,7 @@ function resetFarm() {
   S.kills = {};
   S.farmSeen = {};
   save();
-  log('🗑 mob farmati azzerati', '#9cf');
+  log('🗑 farmed monsters reset', '#9cf');
   renderUI();
 }
 
@@ -3192,7 +3231,7 @@ function buildUI() {
       pvpRefreshTokens(true);
     } else if (a === 'scout') {
       S.pvp.scout.enabled = !S.pvp.scout.enabled; save(); renderUI();
-      log(`📡 PvP Scout ${S.pvp.scout.enabled ? 'ON — impara dalle battaglie recenti' : 'OFF'}`, '#7df');
+      log(`📡 PvP Scout ${S.pvp.scout.enabled ? 'ON — learning from recent battles' : 'OFF'}`, '#7df');
       if (S.pvp.scout.enabled) pvpScout(true);   // primo giro subito
     } else if (a === 'reset') {
       resetPvpRecord(false);
@@ -3335,7 +3374,7 @@ async function keepAwake() {
     if ('wakeLock' in navigator && document.visibilityState === 'visible' && !_wakeLock) {
       _wakeLock = await navigator.wakeLock.request('screen');
       _wakeLock.addEventListener('release', () => { _wakeLock = null; });
-      log('📱 wake-lock ON · schermo resta acceso finché la tab è aperta in primo piano', '#9cf');
+      log('📱 wake-lock ON · screen stays awake while the tab is open in the foreground', '#9cf');
     }
   } catch { /* unsupported / denied / not allowed (e.g. low battery) — ignore */ }
 }
@@ -3350,7 +3389,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 Veyra Farm v1.64.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
+  log(`🔧 Veyra Farm v1.67.1 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
   dlog(`debug: precise tiers ≤x100 on threshold targets, free on farm trash · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
@@ -3368,7 +3407,7 @@ function init() {
   // AUTO-PvP: tab ⚔ PvP nel pannello (su ogni pagina). Il loop gira sempre ma agisce solo
   // quando S.pvp.enabled è ON; allora il farm va in pausa (guardia in mainLoop). Da spento
   // aggiorna comunque il conteggio token per il tab.
-  log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON (auto)' : 'OFF (apri il tab ⚔ PvP)'} · classi imparate: ${Object.keys(S.pvp.db.classes || {}).length}`, '#ff5c8a');
+  log(`⚔ AutoPvP ${S.pvp.enabled ? 'ON (auto)' : 'OFF (open the ⚔ PvP tab)'} · classes learned: ${Object.keys(S.pvp.db.classes || {}).length}`, '#ff5c8a');
   pvpRefreshTokens(true);
   pvpLoop().catch(e => console.error('[AutoPvP]', e));
   mainLoop().catch(e => console.error('[FarmBot]', e));
