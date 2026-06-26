@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.67.1
+// @version      1.68.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -186,6 +186,7 @@ const defState = () => ({
     // (skill/danno/effetti/profilo) senza dover combattere ogni classe di persona.
     scout: { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null },
     defSeen: [],                // match_id delle DIFESE già conteggiate nel record (il bot non le gioca)
+    curMode: null,              // modalità di filler scelta per il match corrente ('aggressive'|'conserve')
   },
 });
 let S = (() => {
@@ -1497,6 +1498,7 @@ async function processQuests() {
 const PVP_PAGE = /\/pvp(_battle)?\.php$/.test(location.pathname);
 let _pvpUrlConsumed = false, _pvpStale = 0, _pvpLastSave = 0;
 let _pvpTurnMid = null, _pvpMyTurns = 0;   // conta i MIEI turni nel match corrente (per l'apertura Ironclad)
+let _pvpModeMid = null;                     // mid per cui S.pvp.curMode è già stato scelto (1 volta/match)
 
 const pvpReqHeaders = extra => Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, extra || {});
 async function pvpState(mid) {
@@ -1720,6 +1722,23 @@ async function pvpSyncDefenses(html) {
   return added;
 }
 
+// APPRENDIMENTO VERO della strategia (bandit epsilon-greedy per-classe). Sceglie la modalità di
+// FILLER per il match: 'aggressive' (a vita alta usa il miglior colpo affordable invece di Slash —
+// più danno per turno) vs 'conserve' (Slash gratis, accumula Rage/token per il Ragnarok). Il bot
+// PROVA entrambe contro ogni classe e tiene quella con winrate più alto. Diagnosi 2026-06-27: il
+// solo-conserve perdeva partite pur facendo PIÙ danno totale (7 Slash da 14k = bleed di tempo
+// mentre l'avversario picchia 100k+/turno) → default 'aggressive' per le classi nuove.
+function pvpChooseFiller(cls) {
+  const C = S.pvp.db.classes[cls]; const s = C && C.strat;
+  if (!s) return 'aggressive';
+  const na = s.agg?.n || 0, nc = s.con?.n || 0;
+  if (na < 3) return 'aggressive';                       // esplora: almeno 3 prove a testa
+  if (nc < 3) return 'conserve';
+  if (Math.random() < 0.15) return Math.random() < 0.5 ? 'aggressive' : 'conserve';  // epsilon-explore
+  const wr = b => b.n ? b.w / b.n : 0;
+  return wr(s.agg) >= wr(s.con) ? 'aggressive' : 'conserve';   // exploit: la migliore finora
+}
+
 // scelta adattiva della skill — "quale e quando". Usa il danno IMPARATO nel db, il nuke a
 // Rage piena, la consapevolezza della classe (curatori → burst) e una regola di sopravvivenza
 // (HP basso a Rage piena → skill difensiva potenziata invece del nuke).
@@ -1864,7 +1883,9 @@ function pvpPick(state, myTurns) {
     if (nuke && zerk && enemyShielded && slash && (dmgOf(nuke) || 0) < enemyShield + ehp) {
       S.pvp.note = 'hold Ragnarok (enemy shield ' + fmtDmg(enemyShield) + ')'; return { id: slash.id, tk: enemy.key };
     }
-    if (nuke && (!zerk || lowHp)) { S.pvp.note = nuke.name + '@full' + (zerk ? ' (lowHP heal)' : ''); return { id: nuke.id, tk: enemy.key }; }
+    // in modalità AGGRESSIVE (imparata) il Berserker NON aspetta il <50% HP: lancia il Ragnarok a Rage
+    // piena (trade 762k danno per ~261k backlash = ottimo nella gara di DPS). In 'conserve' resta gated.
+    if (nuke && (!zerk || lowHp || S.pvp.curMode === 'aggressive')) { S.pvp.note = nuke.name + '@full' + (lowHp && zerk ? ' (lowHP heal)' : ''); return { id: nuke.id, tk: enemy.key }; }
     if (nuke && zerk && !lowHp && slash) { S.pvp.note = 'hold Ragnarok (HP ' + Math.round(myHpPct * 100) + '% > 50)'; return { id: slash.id, tk: enemy.key }; }
     // l'ultimate ESISTE ma non ho i token (tokens < costo) → Slash per RICARICARE token, NON bruciare
     // la finestra su un mid-skill (la Rage si azzera comunque, al prossimo ciclo nuko coi token su).
@@ -1897,7 +1918,15 @@ function pvpPick(state, myTurns) {
     if (threat && ironclad && tokens - cost(ironclad) >= comboCost) {
       S.pvp.note = 'def-filler ' + ironclad.name; return { id: ironclad.id, tk: enemy.key };
     }
-    // niente minaccia → CONSERVA: cadi a Slash (step 5) per caricare Rage e rigenerare token.
+    // ADATTIVO (imparato per-classe da pvpChooseFiller): in modalità AGGRESSIVE non sprecare i turni
+    // con Slash da 14k a vita alta — colpisci col miglior hit affordable RISERVANDO i token della combo
+    // (Ragnarok). Fix del bleed di tempo che faceva perdere match pur out-damageando. In 'conserve' cade
+    // a Slash come prima. Il bot prova entrambe e tiene la migliore per ogni classe.
+    if (S.pvp.curMode === 'aggressive' && powerHit && tokens - cost(powerHit) >= comboCost
+        && (dmgOf(powerHit) || 0) > (dmgOf(slash) || 0)) {
+      S.pvp.note = 'aggr filler ' + powerHit.name; return { id: powerHit.id, tk: enemy.key };
+    }
+    // 'conserve' (o token insufficienti) → cadi a Slash (step 5) per caricare Rage e rigenerare token.
   } else if (powerHit && (dmgOf(powerHit) || 0) > (dmgOf(slash) || 0)) {
     S.pvp.note = 'filler ' + powerHit.name; return { id: powerHit.id, tk: enemy.key };
   }
@@ -1933,8 +1962,15 @@ function pvpEndMatch(state) {
   if (C) {
     C.matches = (C.matches || 0) + 1;
     if (!win) { C.losses = (C.losses || 0) + 1; C.lastLoss = reason; C.lossReasons = C.lossReasons || {}; C.lossReasons[reason] = (C.lossReasons[reason] || 0) + 1; }
+    // APPRENDIMENTO: accredita la vittoria/sconfitta alla modalità di filler usata in QUESTO match
+    // → pvpChooseFiller imparerà quale modalità vince di più contro questa classe.
+    if (S.pvp.curMode) {
+      C.strat = C.strat || { agg: { w: 0, n: 0 }, con: { w: 0, n: 0 } };
+      const b = S.pvp.curMode === 'aggressive' ? C.strat.agg : C.strat.con;
+      b.n++; if (win) b.w++; C.strat.mode = S.pvp.curMode;
+    }
   }
-  S.pvp.cur = null; _pvpUrlConsumed = true; save();
+  S.pvp.cur = null; _pvpModeMid = null; _pvpUrlConsumed = true; save();
   const prof = pvpProfile(cls);
   log(`⚔ PvP ${win ? 'WIN' : 'LOSS'} vs ${cls}${prof.healer ? ' (healer)' : ''}${prof.bursty ? ' (nuker)' : ''} · ${reason} · myDmg ${fmtDmg(st.myDmg)} / theirHeal ${fmtDmg(st.enemyHeal)} / theirBig ${fmtDmg(st.enemyBig)} · 🎟 tokens me ${st.myTokens||0} / enemy ${st.enemyTokens||0} · ${S.pvp.wins}W/${S.pvp.losses}L`, win ? '#2f8' : '#f88');
 }
@@ -2022,6 +2058,8 @@ async function pvpLoop() {
       _pvpStale = 0;
       const enemyU = Object.values(s.teams?.enemy?.players_by_num || {})[0];
       S.pvp.lastClass = enemyU?.advanced_class_name || '';
+      // scegli UNA volta per match la modalità di filler imparata per questa classe (stabile fino a fine match)
+      if (_pvpModeMid !== S.pvp.cur) { _pvpModeMid = S.pvp.cur; S.pvp.curMode = pvpChooseFiller(S.pvp.lastClass || 'Unknown'); }
       pvpLearn(S.pvp.cur, s, s.new_logs);
       if (s.match.ended) { pvpEndMatch(s); pvpRefreshTokens(true); pvpTabRefresh(); continue; }
       // FAST mode: il turno nemico passa da lento a ~1s → match molto più rapidi (il bottone
@@ -2091,9 +2129,13 @@ function renderPvp() {
     const prof = pvpProfile(c.class);
     const tag = (prof.healer ? '💚' : '') + (prof.bursty ? '💥' : '');
     const nSk = Object.keys(c.skills || {}).length, nEf = Object.keys(c.effects || {}).length;
-    return `<div style="font-size:11px;padding:1px 0" title="${esc(c.class||'?')}: ${w} wins / ${l} losses · ${nSk} skills learned · ${nEf} status effects seen">
+    const s = c.strat;
+    const stratTip = s ? ` · learned play: aggressive ${s.agg?.w||0}/${s.agg?.n||0} vs conserve ${s.con?.w||0}/${s.con?.n||0}` : '';
+    const wrA = s && s.agg?.n ? s.agg.w/s.agg.n : -1, wrC = s && s.con?.n ? s.con.w/s.con.n : -1;
+    const best = (wrA<0 && wrC<0) ? '' : (wrA>=wrC ? '⚔' : '🛡');   // ⚔ = aggressive, 🛡 = conserve
+    return `<div style="font-size:11px;padding:1px 0" title="${esc(c.class||'?')}: ${w} wins / ${l} losses · ${nSk} skills learned · ${nEf} status effects seen${stratTip}">
       <div style="display:flex;justify-content:space-between">
-        <span style="color:#cda">${esc(c.class || '?')} ${tag}</span>
+        <span style="color:#cda">${esc(c.class || '?')} ${tag}${best}</span>
         <span style="color:#778">${w}W/${l}L · ${nSk} skills · ${nEf} fx</span></div>
       ${c.lastLoss ? `<div style="color:#a88;font-size:10px;padding-left:8px">↳ last loss: ${esc(c.lastLoss)}</div>` : ''}</div>`;
   }).join('');
@@ -2136,7 +2178,7 @@ function renderPvp() {
     <div style="color:#667;font-size:10px;margin:-3px 0 7px">reads the logs of ALL players' recent battles (even while AutoPvP is OFF) → learns each class's skills/damage/effects without having to fight them.</div>
 
     <div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:3px">📚 Classes learned (${Object.keys(p.db.classes||{}).length})
-      <span style="color:#667;font-weight:normal;font-size:10px">· 💚 healer 💥 nuker · W/L · skills · effects</span></div>
+      <span style="color:#667;font-weight:normal;font-size:10px">· 💚 healer 💥 nuker · ⚔/🛡 = best learned play · hover for details</span></div>
     ${rows || '<div style="color:#667;font-size:11px">none yet — start it, play a match, or let the scout run</div>'}
 
     <div style="display:flex;gap:6px;margin-top:9px">
@@ -3389,7 +3431,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 Veyra Farm v1.67.1 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
+  log(`🔧 Veyra Farm v1.68.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
   dlog(`debug: precise tiers ≤x100 on threshold targets, free on farm trash · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
