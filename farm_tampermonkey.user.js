@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.68.0
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe
+// @version      1.79.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -27,8 +27,16 @@ const DUNGEON_BOSS_POLL = 3000;
 // (item 35, Full Stamina Potion) — only ever spend LSP (251, Large, +5000), and only
 // if needed. FSP is kept untouched, so it's deliberately NOT in this list.
 const STAM_POTS = [
-  { item: 251, name: 'LSP' },   // Large Stamina Potion (+5000) — the ONLY potion the bot drinks
+  { item: 251, name: 'LSP' },   // Large Stamina Potion (+5000) — the primary potion the bot drinks
 ];
+// Full Stamina Potion (item 35). NOT in STAM_POTS on purpose — it's the precious stash.
+// Used ONLY as a fallback when the user ticks "use FSP if LSP is out" (S.fspFallback) AND
+// every LSP is gone. pickPotion() falls through to it; otherwise FSP is never touched.
+const FSP_POT = { item: 35, name: 'FSP' };
+// Small Stamina Potion (item 30, +500) — bought from the merchant (merch_id 1, 50g each).
+// The lifeline for LOW-LEVEL accounts that can't farm timed-boss FSP/LSP drops: opt-in via
+// S.buyStamPotions. Never touched unless that toggle is on, so high-level accounts ignore it.
+const SSP_POT = { item: 30, name: 'SSP', merchId: 1, refill: 500 };
 
 // Attack tiers (skill_id → stamina). Damage is LINEAR in stamina (verified from
 // the battle-page formula: dmg = K * stamina_cost, K constant per fight). So we
@@ -96,7 +104,7 @@ function srcUrl(w) {
 // Build the runtime WAVES (page sources with compiled match fns) from saved config.
 // Disabled sources/targets are dropped so the main loop never sees them.
 function buildWaves() {
-  return (S.config || []).filter(w => w.enabled !== false && w.kind !== 'dungeon' && w.kind !== 'dungeonloc').map(w => ({
+  return (S.config || []).filter(w => w.enabled !== false && w.kind !== 'dungeon' && w.kind !== 'dungeonloc' && w.kind !== 'single').map(w => ({
     id:    w.id,
     label: w.label || pageLabel(srcUrl(w)) || w.id,
     url:   srcUrl(w),
@@ -147,6 +155,17 @@ const defState = () => ({
   // (prima era un kill-switch totale "tutto o niente" — l'etichetta diceva "solo timed"
   // ma in realtà beveva anche per il farm: incoerenza sistemata in v1.23.0.)
   lspEnabled: true,
+  // Fallback: when every LSP is gone, drink a FULL Stamina Potion (item 35) instead of
+  // waiting for natural regen. OFF by default so the FSP stash stays untouched (the old
+  // hard rule); turn it ON in ⚙ Setup to let the bot dip into FSP once LSP runs out.
+  fspFallback: false,
+  // Low-level lifeline: when stamina potions run out, BUY Small Stamina Potions from the
+  // merchant (merch_id 1, 50g) and keep farming. OFF by default (high-level accounts don't
+  // need it). Turn ON for a low-level alt in ⚙ Setup. Spends gold.
+  buyStamPotions: false,
+  // Autolevel (low-level alt): spend free stat points into stamina every cycle. Combined
+  // with buyStamPotions + FSP fallback it keeps a low account farming & leveling non-stop.
+  autolevel: false,
   // ── HP potions (auto-heal) ──────────────────────────────────────────────────
   // Soglia (%) sotto la quale il bot beve una pozione HP (user_heal_potion.php).
   // 0 = OFF: non cura MAI (aspetta la rigenerazione naturale, non spende pozioni).
@@ -187,8 +206,26 @@ const defState = () => ({
     scout: { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null },
     defSeen: [],                // match_id delle DIFESE già conteggiate nel record (il bot non le gioca)
     curMode: null,              // modalità di filler scelta per il match corrente ('aggressive'|'conserve')
+    // ── MULTICLASSE + ALLOW-LIST SKILL (utente) ──────────────────────────────────
+    myClass: '',                // la MIA classe, scelta a mano nel tab (guida la strategia). '' = auto (rileva dal match)
+    myKit: [],                  // nomi delle skill del mio kit VISTE dal vivo (per le checkbox dell'allow-list)
+    restrictSkills: false,      // ON = usa SOLO le skill spuntate (per farmare achievement tipo "usa 20× skill X")
+    allowSkills: [],            // nomi delle skill consentite quando restrictSkills è ON (vuoto = nessun vincolo)
   },
 });
+// KIT per classe (nomi delle skill) — sorgente per le checkbox dell'allow-list quando scegli la
+// classe a mano, prima ancora di aver giocato un match. Si fonde col kit visto dal vivo (S.pvp.myKit).
+const PVP_CLASSES = ['Berserker', 'Assassin', 'Archer', 'Magic Knight', 'Grand Mage', 'Saint', 'Paladin', 'Inquisitor'];
+const PVP_KITS = {
+  Berserker:     ['Slash', 'Ironclad Strike', 'Warrior Aura', 'Power Slash', 'Rampage Howl', 'Skullsplitter', 'Ragnarok Cleave'],
+  Assassin:      ['Slash', 'Evasion Instinct', 'Venom Rend', 'Death Mark', 'Power Slash', 'Final Wish'],
+  Archer:        ['Slash', 'Deadeye Release', 'Poison Bloom', 'Black Sky Volley', 'Piercing Starshot', 'Power Slash'],
+  'Magic Knight':['Slash', 'Runebound Slash', 'Spellbreaker Cut', 'Mirror Aegis', 'Eclipse Sever'],
+  'Grand Mage':  ['Slash', 'Meteor Sigil', 'Elemental Dominion', 'Mana Collapse', 'Astral Cataclysm'],
+  Saint:         ['Slash', 'Blessed Recovery', 'Divine Barrier', 'Miracle Thread', 'Heaven Mercy'],
+  Paladin:       ['Slash', 'Radiant Guard', 'Judgment Bash', 'Aegis Intervention', 'Sanctified Verdict'],
+  Inquisitor:    ['Slash', 'Brand of Guilt', 'Purifying Flame', 'Confession Breaker', 'Heal', 'Final Sentence'],
+};
 let S = (() => {
   try { return JSON.parse(GM_getValue(SK, 'null')) || defState(); }
   catch { return defState(); }
@@ -198,9 +235,19 @@ for (const [k, v] of Object.entries(defState())) if (S[k] === undefined) S[k] = 
 // v1.67.0: ensure the PvP scout sub-state exists on saves from before scouting landed.
 if (S.pvp && !S.pvp.scout) S.pvp.scout = { enabled: true, seenMids: [], lastRun: 0, learned: 0, cursor: null };
 if (S.pvp && !Array.isArray(S.pvp.defSeen)) S.pvp.defSeen = [];
+// multiclasse + allow-list skill: assicura i campi su salvataggi precedenti
+if (S.pvp) {
+  if (S.pvp.myClass == null) S.pvp.myClass = '';
+  if (!Array.isArray(S.pvp.myKit)) S.pvp.myKit = [];
+  if (S.pvp.restrictSkills == null) S.pvp.restrictSkills = false;
+  if (!Array.isArray(S.pvp.allowSkills)) S.pvp.allowSkills = [];
+}
 // v1.66.0: the hit-style toggle (smallHits) was removed — precision is now automatic by
 // target type (threshold/cap → exact, farm trash → free). Drop the dead field from old saves.
 delete S.smallHits; delete S._exactMigrated;
+// Quest die-timer sanity: values > 4h are stale leftovers from a previous bug that used
+// data-expire (~48h) instead of the real fetchAutoDie timer (~22min for wave mobs).
+if (S._questNextDie && S._questNextDie - Date.now() > 4 * 3600_000) S._questNextDie = 0;
 // seed the editable wave config on first run (or if wiped)
 if (!Array.isArray(S.config) || !S.config.length) {
   S.config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -434,7 +481,9 @@ async function refreshInv() {
   if (!html) return;
   const doc = new DOMParser().parseFromString(html, 'text/html');
   S.potInv = S.potInv || {};
-  for (const p of STAM_POTS) {
+  // Always read FSP stock too (item 35) so the fallback knows how many are left — it's still
+  // only ever SPENT when S.fspFallback is on and LSP is out (see pickPotion).
+  for (const p of [...STAM_POTS, FSP_POT, SSP_POT]) {
     const card = doc.querySelector(`[data-item-id="${p.item}"]`);
     if (card) {
       const inv = card.getAttribute('data-inv-id');
@@ -444,9 +493,10 @@ async function refreshInv() {
       delete S.potInv[p.item];
     }
   }
-  S.lspInv = S.potInv[251]?.inv || null;   // legacy field, kept in sync (LSP only — FSP never touched)
+  S.lspInv = S.potInv[251]?.inv || null;   // legacy field, kept in sync
   save();
-  log(`potions: ${STAM_POTS.map(p => `${p.name} x${S.potInv[p.item]?.qty ?? 0}`).join(' · ')}`, '#0cf');
+  const shown = [...STAM_POTS, ...(S.fspFallback ? [FSP_POT] : [])];
+  log(`potions: ${shown.map(p => `${p.name} x${S.potInv[p.item]?.qty ?? 0}`).join(' · ')}`, '#0cf');
 }
 
 // first potion in priority order that still has stock (LSP only — FSP is never touched)
@@ -454,6 +504,26 @@ function pickPotion() {
   for (const p of STAM_POTS) {
     const e = S.potInv?.[p.item];
     if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...p, inv: e.inv };
+  }
+  // LV200+: FSP (full refill) beats SSP (+500) — SSP is just a low-level lifeline.
+  // Below LV200: SSP comes first (cheap, buyable, fits the stamina pool).
+  const highLevel = (S.userLevel || 0) >= 200;
+  if (highLevel && S.fspFallback) {
+    const e = S.potInv?.[FSP_POT.item];
+    if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...FSP_POT, inv: e.inv };
+  }
+  // Small Stamina Potions (item 30): USE them whenever they're in the bag — they're cheap
+  // and buyable, and they're the low-level account's main stamina source. Usage is NOT gated
+  // by S.buyStamPotions (that toggle only controls RESTOCKING from the merchant); if the
+  // account already owns SSP, drink them regardless.
+  {
+    const e = S.potInv?.[SSP_POT.item];
+    if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...SSP_POT, inv: e.inv };
+  }
+  // Fallback: LSP out + not high-level. Only dip into FSP if opted in.
+  if (!highLevel && S.fspFallback) {
+    const e = S.potInv?.[FSP_POT.item];
+    if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...FSP_POT, inv: e.inv };
   }
   return null;
 }
@@ -465,7 +535,19 @@ async function useLSP(timer = false) {
   if (!timer && !S.lspEnabled) return false;
   let pick = pickPotion();
   if (!pick) { await refreshInv(); pick = pickPotion(); }
-  if (!pick) { log('no LSP left (FSP is never used)', '#f66'); return false; }
+  // Low-level lifeline: out of stamina potions but allowed to buy → restock Small Stamina
+  // Potions from the merchant (best-effort, throttled), then retry. If the buy fails (no gold
+  // / weekly cap), we just fall through and wait for natural regen.
+  if (!pick && S.buyStamPotions && Date.now() - (S._stamRestockAt || 0) > 120_000) {
+    S._stamRestockAt = Date.now();
+    log('🛒 out of stamina potions — buying Small Stamina Potions from merchant…', '#9cf');
+    const br = await post('merchant_buy.php', { merch_id: SSP_POT.merchId, qty: 20 });
+    if (br?.message || br?.status) log(`🛒 merchant says: ${br.status || ''} ${br.message || ''}`.trim(), '#9cf');
+    await refreshInv();
+    pick = pickPotion();
+    if (pick) log(`🛒 restocked SSP x${S.potInv?.[SSP_POT.item]?.qty ?? '?'}`, '#2f8');
+  }
+  if (!pick) { log(S.buyStamPotions ? 'no stamina potions and merchant buy failed (no gold / weekly cap) — waiting for regen' : S.fspFallback ? 'no stamina potions left (LSP + FSP both out)' : 'no LSP left (enable FSP fallback in ⚙ Setup to use FSP)', '#f66'); return false; }
 
   // Read the RAW response. use_item.php may not return clean JSON — when it didn't,
   // post() returned null, so `ok` was always false: the counter stayed at 0 and
@@ -499,7 +581,10 @@ async function useLSP(timer = false) {
     // second potion. The next damage.php response carries the real stamina.
     const fromText = (txt.match(/stamina["':\s]+([\d,]+)/i)?.[1] || '').replace(/,/g, '');
     const parsed   = parseInt(data?.stamina ?? fromText);
-    stam = (Number.isFinite(parsed) && parsed > 0) ? parsed : Math.max(stam, 5000);
+    // if the response didn't carry the new stamina, assume this potion's nominal refill
+    // (SSP +500, LSP/FSP +5000) so we don't over-assume and skip a needed second potion.
+    const assumed  = pick.refill || 5000;
+    stam = (Number.isFinite(parsed) && parsed > 0) ? parsed : Math.max(stam, assumed);
     save();
   } else if (/not enough|don'?t have|0|empty|invalid/i.test(txt)) {
     // this potion is actually empty — zero it and let the next call fall through to
@@ -519,22 +604,59 @@ async function useLSP(timer = false) {
 // potions_remaining}. Called the moment a retaliation kills us so the bot keeps
 // fighting instead of sitting dead (which silently stalls ALL attacks).
 async function healUp(dead = false) {
-  if (hpEmpty) return false;
-  const d = await post('user_heal_potion.php', { user_id: uid() });
-  const ok = !!(d && (d.status === 'success' || /full hp/i.test(d.message || '')));
-  if (ok) {
-    userHp = parseInt(d.user_hp) || userHp;
-    if (userHp) userHpMax = Math.max(userHpMax || 0, userHp);   // full heal ⇒ this is max HP
-    S.hpHeals++; save();
-    const left = d.potions_remaining ?? '?';
-    if (left === 0 || left === '0') hpEmpty = true;
-    log(`${dead ? '💀→❤️ died' : `🩹 HP ≤${S.hpHealPct}%`}: HP potion used (#${S.hpHeals}, left: ${left}) — HP now ${userHp}/${userHpMax}`, '#f44');
-  } else {
-    const msg = d?.message || 'no resp';
-    if (/no potion|0 potion|don'?t have|out of/i.test(msg)) hpEmpty = true;
-    log(`HP heal failed: ${msg}`, '#f66');
+  // 1) HP POTION (item 108) — instant, no cooldown. Skip once we've learned we have none.
+  if (!hpEmpty) {
+    const d = await post('user_heal_potion.php', { user_id: uid() });
+    const ok = !!(d && (d.status === 'success' || /full hp/i.test(d.message || '')));
+    if (ok) {
+      userHp = parseInt(d.user_hp) || userHp;
+      if (userHp) userHpMax = Math.max(userHpMax || 0, userHp);   // full heal ⇒ this is max HP
+      S.hpHeals++; save();
+      const left = d.potions_remaining ?? '?';
+      if (left === 0 || left === '0') hpEmpty = true;
+      log(`${dead ? '💀→❤️ died' : `🩹 HP ≤${S.hpHealPct}%`}: HP potion used (#${S.hpHeals}, left: ${left}) — HP now ${userHp}/${userHpMax}`, '#f44');
+      return true;
+    }
+    // "You do not have a healing potion (ID 108)" → no potion in bag; fall through to free heal
+    const msg = d?.message || '';
+    if (/no.*potion|0 potion|do(n'?|\s+no)t have|out of|(ID 108)/i.test(msg)) hpEmpty = true;
+    else log(`HP potion heal failed: ${msg || 'no resp'}`, '#f66');
   }
-  return ok;
+  // 1b) RESTOCK from the merchant (opt-in — spends gold). merch_id 22 = Full HP Potion (5000g
+  // each). Throttled to ~1h (the merchant restocks weekly; this just avoids hammering). Best-
+  // effort buy, then RE-TRY the potion — the potion result decides whether the buy worked.
+  if (hpEmpty && S.buyHpPotions && Date.now() - (S._restockAt || 0) > 3600_000) {
+    S._restockAt = Date.now();
+    const hb = await post('merchant_buy.php', { merch_id: 22, qty: 25 });
+    if (hb?.message || hb?.status) log(`🛒 merchant says: ${hb.status || ''} ${hb.message || ''}`.trim(), '#9cf');
+    const d = await post('user_heal_potion.php', { user_id: uid() });
+    if (d && (d.status === 'success' || /full hp/i.test(d.message || ''))) {
+      hpEmpty = false;
+      userHp = parseInt(d.user_hp) || userHp; if (userHp) userHpMax = Math.max(userHpMax || 0, userHp);
+      S.hpHeals++; save();
+      log(`🛒❤️ bought + used HP potion from merchant — HP ${userHp}/${userHpMax}`, '#3f8');
+      return true;
+    }
+    log(`🛒 HP restock gave no usable potion (no gold / weekly limit)`, '#fa0');
+  }
+  // 2) FREE RESURRECT (user_heal.php) — "You rise again at full strength", but ~1h cooldown.
+  // Use when actually DEAD, or when CRITICAL (≤5% HP with no potions — the account is one
+  // retaliation from death anyway; slot-4 sat at 2 HP for a day because this was dead-only).
+  // Normal threshold top-ups still never burn the hourly heal.
+  const critical = userHpMax > 0 && userHp != null && userHp / userHpMax <= 0.05;
+  if ((dead || critical) && Date.now() - (S._freeHealAt || 0) > 3600_000) {
+    const d = await post('user_heal.php', { user_id: uid() });
+    const ok = !!(d && (d.status === 'success' || /rise again|full strength|healed/i.test(d.message || '')));
+    if (ok) {
+      S._freeHealAt = Date.now(); S.hpHeals++; save();
+      if (userHpMax) userHp = userHpMax;
+      log(`💚 free resurrect (no HP potion) — ${d.message || 'ok'} · next in 1h`, '#3f8');
+      return true;
+    }
+    S._freeHealAt = Date.now() - 3600_000 + 5 * 60_000;   // cooldown → back off ~5 min, don't hammer
+    log(`💔 no HP potion & free heal on cooldown: ${d?.message || 'no resp'} — buy HP potions at the merchant`, '#f66');
+  }
+  return false;
 }
 
 // ── WAVE PARSE ────────────────────────────────────────────────────────────────
@@ -561,6 +683,16 @@ function parseMobs(html) {
   return _collectMobs(new DOMParser().parseFromString(html, 'text/html'));
 }
 
+// On a single-boss battle page (battle.php?id=…) the leaderboard widget shows OUR running
+// cumulative damage on that boss in #yourDamageValue (e.g. "2,009,123,500"). That's the
+// number a 'single' target stops at. Returns an int, or null when the element is absent.
+function readYourDamage(root) {
+  const el = root && root.querySelector('#yourDamageValue');
+  if (!el) return null;
+  const n = parseInt((el.textContent || '').replace(/[^\d]/g, ''), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 // Auto-summon cards carry the authoritative boss timers:
 //   .auto-summon-name, data-alive (1/0), data-next-ts (unix respawn ts)
 function _collectAutoSummon(root) {
@@ -583,6 +715,20 @@ function parseAutoSummon(html) {
 // (View → battle.php?dgmid=…&instance_id=…). The monster name comes from the image
 // filename (Prismblade_Reaver.webp → "prismblade reaver"); a `.mon.dead` class marks
 // a killed/looted instance. Works on a parsed doc OR the live `document`.
+// The STABLE monster name is a class-less <div> at the top of the card (verified live
+// 2026-07-10: "Orc Stone-Rend"). The IMAGE filename is a per-instance random hash
+// (monster_68e5….webp) that changes every daily instance, so reading the name from the
+// image made yesterday's name checklist match NOTHING today → "il bot non riconosce il
+// dungeon nuovo". Read the card TEXT instead; the pills / HP / stat rows all have a class.
+function _monNameFromCard(c) {
+  for (const el of c.querySelectorAll('div,span,b,strong,h1,h2,h3,h4,p')) {
+    if (el.getAttribute('class')) continue;          // pills/muted/stat* have classes — skip them
+    let own = ''; for (const n of el.childNodes) if (n.nodeType === 3) own += n.textContent;
+    own = own.replace(/\s+/g, ' ').trim();
+    if (own.length >= 2 && own.length <= 40) return own.toLowerCase();
+  }
+  return '';
+}
 function _collectDungeonMons(root) {
   const out = [];
   for (const c of root.querySelectorAll('.mon')) {
@@ -591,14 +737,73 @@ function _collectDungeonMons(root) {
     const dgmid       = (href.match(/dgmid=(\d+)/)       || [])[1];
     const instance_id = (href.match(/instance_id=(\d+)/) || [])[1];
     if (!dgmid) continue;
-    const file = (c.querySelector('img')?.getAttribute('src') || '').split('?')[0].split('/').pop() || '';
-    const name = file.replace(/\.\w+$/, '').replace(/[_-]+/g, ' ').toLowerCase().trim();
+    let name = _monNameFromCard(c);
+    if (!name) {   // fallback: old image-filename behaviour (may be an unstable hash)
+      const file = (c.querySelector('img')?.getAttribute('src') || '').split('?')[0].split('/').pop() || '';
+      name = file.replace(/\.\w+$/, '').replace(/[_-]+/g, ' ').toLowerCase().trim();
+    }
     out.push({ dgmid, instance_id, name, dead: /(^|\s)dead(\s|$)/.test(c.className) });
   }
   return out;
 }
 function parseDungeonMons(html) {
   return _collectDungeonMons(new DOMParser().parseFromString(html, 'text/html'));
+}
+
+// ── Guild-dungeon DAILY instance resolver ────────────────────────────────────
+// The guild dungeon rotates every day: the same 3 STABLE dungeon TYPES
+// (dungeon_info.php?id=1|2|3) get a FRESH instance_id each day. Entry chain (verified
+// live 2026-07-10): guild_dungeon.php lists today's OPEN dungeons (button "Enter" →
+// guild_dungeon_enter.php?id=N) + yesterday's ("View · ✅ Already looted"). enter id N ==
+// instance_id → guild_dungeon_instance.php?id=N → 5× guild_dungeon_location.php?instance_id=N&location_id=1..5.
+// A dungeonloc source pinned to yesterday's instance_id fetches a dead page → 0 mobs.
+// So we anchor a source to its dungeonType and re-resolve TODAY's open instance_id here.
+const _dunInstCache = { ts: 0, byType: {} };   // type(str) → { instanceId }
+const DUN_INST_TTL = 5 * 60_000;
+async function resolveDungeonInstances(force) {
+  if (!force && Date.now() - _dunInstCache.ts < DUN_INST_TTL && Object.keys(_dunInstCache.byType).length)
+    return _dunInstCache.byType;
+  const html = await getHtml(`${BASE}/guild_dungeon.php`);
+  if (!html) return _dunInstCache.byType;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const byType = {};
+  for (const info of doc.querySelectorAll('a[href*="dungeon_info.php"]')) {
+    const type = (info.getAttribute('href').match(/id=(\d+)/) || [])[1];
+    if (!type) continue;
+    // climb to the row that also holds this dungeon's Enter link
+    let box = info.closest('div,li,article,section') || info.parentElement;
+    for (let i = 0; i < 5 && box && !box.querySelector('a[href*="guild_dungeon_enter.php"]'); i++) box = box.parentElement;
+    const enter = box?.querySelector('a[href*="guild_dungeon_enter.php"]');
+    if (!enter) continue;
+    const inst = (enter.getAttribute('href').match(/id=(\d+)/) || [])[1];
+    if (!inst) continue;
+    const isOpen = /enter/i.test(enter.textContent || '');   // "Enter" = open today; "View" = already looted
+    if (isOpen && !byType[type]) byType[type] = { instanceId: inst };   // first OPEN instance per type
+  }
+  // The CUBE guild dungeon ("The Polyhedral Crucible") has no dungeon_info.php link — its hub
+  // card is the `the_cube` banner. Its PvE lanes are ordinary guild_dungeon_location.php pages,
+  // so we resolve it as the pseudo-type 'cube' and the rest of the dungeonloc path reuses it.
+  for (const img of doc.querySelectorAll('img[src*="the_cube"], img[src*="cube"]')) {
+    let box = img.closest('div,li,article,section') || img.parentElement;
+    for (let i = 0; i < 5 && box && !box.querySelector('a[href*="guild_dungeon_enter.php"]'); i++) box = box.parentElement;
+    const enter = box?.querySelector('a[href*="guild_dungeon_enter.php"]');
+    if (!enter || !/enter/i.test(enter.textContent || '')) continue;   // "View" = already looted
+    const inst = (enter.getAttribute('href').match(/id=(\d+)/) || [])[1];
+    if (inst && !byType.cube) { byType.cube = { instanceId: inst }; break; }
+  }
+  if (Object.keys(byType).length) { _dunInstCache.ts = Date.now(); _dunInstCache.byType = byType; }
+  return _dunInstCache.byType;
+}
+// Today's live location URL for a source: dungeonType-anchored sources re-resolve the
+// daily instance_id; legacy sources fall back to their saved URL. null = today's dungeon
+// of this type isn't open (or already looted) → the caller skips this pass.
+async function dungeonLocUrl(src) {
+  if (src.dungeonType != null && src.location_id != null) {
+    const map = await resolveDungeonInstances();
+    const inst = map[String(src.dungeonType)]?.instanceId;
+    return inst ? `${BASE}/guild_dungeon_location.php?instance_id=${inst}&location_id=${src.location_id}` : null;
+  }
+  return srcUrl(src);
 }
 
 // per-target auto-die timestamp of the currently-alive boss instance (seconds).
@@ -618,9 +823,20 @@ const CACHE_TTL  = 30_000;
 const DL_TTL    = 18 * 3600_000;   // 18h — long enough to cover a farming session, short
                                    // enough that the next daily opening starts fresh
 const _dlCache  = {};
-const _dlLooted = new Map();        // dgmid → timestamp we hit our target
+const _dlLooted = new Map();        // dgmid → timestamp we FULLY claimed it (dead-loot, or genuine server-cap giveup)
+const _dlCapTries = {};             // dgmid → consecutive UNDER-target 'cap' exits (give up after 3)
+const _dlRetryAt  = {};             // dgmid → don't re-attack before this ts (unspawned boss / locked lane)
+// dgmid → { dmg, ts }: for ALIVE shared cube/dungeon mobs, how much damage we dealt before
+// stopping at OUR configured target. Unlike _dlLooted this is NOT a permanent "done" flag —
+// if the user RAISES the target above `dmg`, the mob is re-attacked for the delta (dealing
+// from `dmg` up to the new target). Same/lower target → still skipped (can't un-deal damage).
+// (Was the bug: a mob capped at 200M went into _dlLooted and raising the cap never re-hit it.)
+const _dlCapDmg = new Map();
 for (const e of (S.dlLooted || [])) {   // load surviving (non-expired) marks
   if (Array.isArray(e) && Date.now() - e[1] < DL_TTL) _dlLooted.set(e[0], e[1]);
+}
+for (const e of (S.dlCapDmg || [])) {   // [dgmid, dmg, ts]
+  if (Array.isArray(e) && Date.now() - e[2] < DL_TTL) _dlCapDmg.set(e[0], { dmg: e[1], ts: e[2] });
 }
 // True only if this dgmid was claimed AND the claim hasn't expired (auto-prunes stale ones
 // so a 24/7 run without a reload still re-farms the dungeon when it re-opens next day).
@@ -637,6 +853,29 @@ function lootedAdd(dgmid) {
   let arr = [..._dlLooted.entries()];
   if (arr.length > 500) { arr = arr.slice(-500); _dlLooted.clear(); for (const [d, t] of arr) _dlLooted.set(d, t); }
   S.dlLooted = arr;
+}
+// How much damage we've already dealt to this ALIVE mob (0 if never/expired). Auto-prunes stale.
+function capDmgOf(dgmid) {
+  const e = _dlCapDmg.get(dgmid);
+  if (e == null) return 0;
+  if (Date.now() - e.ts >= DL_TTL) { _dlCapDmg.delete(dgmid); return 0; }
+  return e.dmg;
+}
+// A cube/dungeon ALIVE shared mob is DONE for this pass ONLY if we've already dealt >= THIS
+// target. It is deliberately NOT gated on isLooted(): the permanent looted flag conflated
+// "reached my cap" with "killed/loot-claimed" and — written by the pre-resume code — kept a
+// mob blocked for 18h even after you RAISED the cap ("continua a non attaccare"). Raising the
+// target makes it not-done again → fightTarget re-joins and self-corrects against the server's
+// real totaldmgdealt, so a mob already at cap costs one probe hit (no overshoot) then re-settles.
+function dungeonDone(dgmid, dmgTarget) {
+  return capDmgOf(dgmid) >= dmgTarget;
+}
+// Record how far we damaged an alive shared mob (resumable if the target is later raised).
+function capDmgAdd(dgmid, dmg) {
+  _dlCapDmg.set(dgmid, { dmg, ts: Date.now() });
+  let arr = [..._dlCapDmg.entries()].map(([d, v]) => [d, v.dmg, v.ts]);
+  if (arr.length > 500) { arr = arr.slice(-500); _dlCapDmg.clear(); for (const [d, dm, t] of arr) _dlCapDmg.set(d, { dmg: dm, ts: t }); }
+  S.dlCapDmg = arr;
 }
 
 const DEAD_PAGES = 6;   // max dead pages to scan per wave
@@ -758,11 +997,20 @@ async function anyTimedReady() {
 // clock skew, returning a client-clock unix-seconds death time.
 async function fetchAutoDie(mid) {
   const html = await getHtml(`${BASE}/battle.php?id=${mid}`);
+  // Primary: timed bosses embed AUTO_DIE_CFG = { nextDieMs, serverNowMs } in the page JS.
   const nd = html.match(/nextDieMs\s*:\s*(\d+)/);
-  if (!nd) return null;
-  const sn = html.match(/serverNowMs\s*:\s*(\d+)/);
-  const remainMs = parseInt(nd[1]) - (sn ? parseInt(sn[1]) : Date.now());
-  return Math.floor((Date.now() + remainMs) / 1000);   // client-clock death ts (s)
+  if (nd) {
+    const sn = html.match(/serverNowMs\s*:\s*(\d+)/);
+    const remainMs = parseInt(nd[1]) - (sn ? parseInt(sn[1]) : Date.now());
+    return Math.floor((Date.now() + remainMs) / 1000);
+  }
+  // Fallback: wave mobs show "Auto die in HH:MM:SS" as plain text without the JS config.
+  const tm = html.match(/Auto\s+die\s+in\s+(\d{1,2}):(\d{2}):(\d{2})/i);
+  if (tm) {
+    const remainMs = (parseInt(tm[1]) * 3600 + parseInt(tm[2]) * 60 + parseInt(tm[3])) * 1000;
+    return Math.floor((Date.now() + remainMs) / 1000);
+  }
+  return null;
 }
 
 // Keep the panel's boss death/respawn countdowns fresh even during a long fight
@@ -862,7 +1110,13 @@ const MAX_TIER_STAM = 100;                    // HARD CAP: never use a tier abov
 
 async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, knownStart, exact = false, harvest = null, timer = false, hardCap = false) {
   await join(idp);
-  let dmg = startDmg, K = 0, stall = 0, measured = !!knownStart;
+  // K (damage/stamina) is ALWAYS learned from an in-fight `before` (the totaldmgdealt of our
+  // previous hit), never from the passed-in startDmg. startDmg comes from the wave page's
+  // userdmg and can be stale/misparsed — trusting it once produced garbage K like 504109/stam
+  // (impossible for a low-level char) which then mis-sized every tier ("troppo/troppo poco
+  // danno"). Cost: the first hit is a 1-stam probe (K unknown) and K lands on hit #2 — cheap.
+  let dmg = startDmg, K = 0, stall = 0, nullStall = 0, measured = false;
+  void knownStart;
   status = `→ ${shortName(label)}`;
 
   while (dmg < dmgTarget && !paused && running) {
@@ -873,14 +1127,14 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     if (interruptible && await anyTimedReady()) { _timedInterrupt = true; return { dmg, reason: 'interrupt' }; }
 
     const remaining = dmgTarget - dmg;
-    // 🏰 HARD CAP (dungeon boss): dmgTarget is a STRICT guild ceiling, not a "stop at".
-    // Once even the smallest hit (1 stam ≈ K dmg) would cross it, STOP here and stay UNDER
-    // — never overshoot the guild's allowed damage. (Normal targets accept a ≤1-hit
-    // overshoot; a dungeon boss must not.) K must be known first (we measure it on hit #2).
-    if (hardCap && K && remaining < K) {
-      log(`🏰 ${label}: cap-safe stop at ${fmtDmg(dmg)} — next hit ≈${fmtDmg(Math.round(K))} would cross cap ${fmtDmg(dmgTarget)}`, '#9cf');
-      return { dmg, reason: 'done' };
-    }
+    // 🎯 THRESHOLD (dungeon miniboss / any target with an explicit damage): dmgTarget is a
+    // FLOOR to CROSS — you must EXCEED it or you get NO drops (guild miniboss rule). We're
+    // ALLOWED to exceed the guild cap, just not by much, so: approach from below with the
+    // biggest non-overshooting tier (precise stepping below), and the FINAL hit falls back to
+    // the 1-stam Slash → we cross the target by AT MOST one smallest hit. (Old hardCap STOPPED
+    // UNDER the target = 1.9B instead of 2B = no drops; and SKIPPED when K was unknown = joined
+    // but 0 damage. Both gone: we probe with the 1-stam Slash, learn K on hit #2, then step
+    // precisely and cross. User: "possiamo sforare il cap di gilda, non di tantissimo".)
     // potion ONLY when truly out of stamina — never just to afford a bigger tier
     // (that was the "pozione senza motivo"). With some stamina left we use the
     // biggest tier we can already afford.
@@ -908,10 +1162,10 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     }
     // pick the attack tier (cap x100 = MAX_TIER_STAM in ALL cases, never 200/1000):
     //  • probe (K unknown) → 1 stam
-    //  • PRECISE (threshold/cap target — timed boss, quest, guild-dungeon: exact||timer||hardCap)
-    //    → biggest tier that fits the stamina AND won't overshoot the remaining gap, stepping
-    //    100→…→1 toward the target so the final damage lands exactly on it (overshoot ≤ 1 stam).
-    //    No wasted stamina/potions where a damage threshold matters.
+    //  • PRECISE (threshold target — timed boss, quest, guild-dungeon miniboss: exact||timer||
+    //    hardCap) → biggest tier that fits the stamina AND won't overshoot the remaining gap,
+    //    stepping 100→…→1 toward the target; the final 1-stam fallback CROSSES it, so we land
+    //    just above the target (overshoot ≤ one 1-stam Slash). No wasted stamina where it matters.
     //  • FARM TRASH (no threshold) → biggest affordable tier ≤ x100; overshoot accepted (more
     //    Orryphos free-hit procs). Precision doesn't matter when you're just killing trash for loot.
     const precise = exact || timer || hardCap;
@@ -922,7 +1176,12 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
 
     const before = dmg;
     const res = await attack(idp, tier.id, tier.stam);
-    if (!res) continue;
+    if (!res) {
+      nullStall++;
+      if (nullStall >= 5) { log(`⛔ ${label}: 5 failed attacks in a row — aborting`, '#f66'); return { dmg, reason: 'err' }; }
+      continue;
+    }
+    nullStall = 0;
     S.attacks++;
     _didWork = true;                                // ho davvero attaccato → non è un giro a vuoto
     const msg = res.message || '';
@@ -931,6 +1190,9 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
     if (nd > before) {
       if (!K && measured) {                        // learn K from a hit with a real "before"
         K = (nd - before) / tier.stam;
+        // persist per-mob + global max per-stam damage so future HARD-CAP fights gate BEFORE
+        // probing → never overshoot the guild cap again on a known mob.
+        if (K > 0 && label) { S.mobK = S.mobK || {}; S.mobK[label] = K; S.knownK = Math.max(S.knownK || 0, K); }
         const est = Math.max(1, Math.ceil((dmgTarget - nd) / K));
         log(`${label}: ${fmtDmg(Math.round(K))}/stam → ~${est} stam to target`, '#9cf');
       }
@@ -1011,7 +1273,7 @@ async function harvestWaveExp(wave, targets) {
       if (!t) continue;
       const r = await lootMob({ monster_id: m.id });
       looted.add(m.id); roundNames.push(m.name);
-      if (r !== null && t.killLimit !== null) {
+      if (r !== null && !t.timer && !t.dungeonBoss) {
         S.kills[m.name] = (S.kills[m.name] || 0) + 1;
         log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}${lootSfx(r)}`, '#2f8');
       }
@@ -1093,7 +1355,7 @@ async function processWave(wave, targets = null, interruptible = false) {
     // remember farm mob names we've encountered so the 🎯 Farming tab lists what we're
     // farming even before the first kill lands (user: "il tab farming si deve
     // aggiornare con i mostri che farmo").
-    if (!t.timer && !t.quest && t.killLimit != null) {
+    if (!t.timer && !t.dungeonBoss && !t.quest) {
       for (const m of matched) if (!isTimedName(m.name)) S.farmSeen[m.name] = Date.now();
     }
   }
@@ -1105,7 +1367,7 @@ async function processWave(wave, targets = null, interruptible = false) {
       if (!t.timer && isTimedName(m.name)) continue;   // farm never claims a timed boss
       const r = await lootMob({ monster_id: m.id });
       if (r !== null) {
-        if (t.killLimit !== null) {
+        if (!t.timer && !t.dungeonBoss) {
           S.kills[m.name] = (S.kills[m.name] || 0) + 1;
           log(`loot ✓ ${m.name} — kill #${S.kills[m.name]}${lootSfx(r)}`, '#2f8');
         } else {
@@ -1120,6 +1382,31 @@ async function processWave(wave, targets = null, interruptible = false) {
   for (const t of targets) {
     if (paused || !running) break;
 
+    // QUEST RE-SYNC: `engaged` is recomputed from the LIVE wave every pass — server
+    // credits (have) + mobs VISIBLE on the page already damaged past the quest floor.
+    // It used to be a grow-only counter: an engaged mob that vanished without our loot
+    // (respawn rotation, someone else's kill) stayed counted forever → "engaged 10/10,
+    // have 7/10" and the bot waited for mobs that would never die instead of engaging
+    // replacements ("rimane lì in attesa di mob che non muoiono mai").
+    if (t.quest && S.questActive) {
+      const thr = S.questActive.minDmg || t.dmgTarget;
+      const engagedM = mobs.filter(m => t.match(m) && !isTimedName(m.name) && m.userdmg >= thr);
+      S.questActive.engaged = Math.min(S.questActive.need || 10, (S.questActive.have || 0) + engagedM.length);
+      // data-expire on the wave card is the CARD TTL (~48h for regular wave mobs), NOT
+      // the mob's real death time.  The real "Auto die in hh:mm:ss" is AUTO_DIE_CFG on
+      // each mob's battle.php page — same source as timed boss timers (fetchAutoDie).
+      // Fetch once per newly-engaged mob; cache in _questMobDieTimes.
+      for (const m of engagedM.filter(x => !x.dead && !_questMobDieTimes[x.id])) {
+        const die = await fetchAutoDie(m.id);
+        if (die) _questMobDieTimes[m.id] = die;
+      }
+      // drop entries for mobs that are no longer alive+engaged
+      const _qEngagedIds = new Set(engagedM.filter(m => !m.dead).map(m => String(m.id)));
+      for (const k of Object.keys(_questMobDieTimes)) if (!_qEngagedIds.has(k)) delete _questMobDieTimes[k];
+      const _qDieTimes = Object.values(_questMobDieTimes);
+      S._questNextDie = _qDieTimes.length ? Math.min(..._qDieTimes) * 1000 : 0;
+    }
+
     const alive = mobs.filter(m =>
       !m.dead &&
       t.match(m) &&
@@ -1133,9 +1420,13 @@ async function processWave(wave, targets = null, interruptible = false) {
       log(`💀 dead & auto-heal OFF — waiting for HP regen (stop ${t.key})`, '#fa0'); break;
     }
 
-    // quest mobs drink potions unconditionally (must complete the quest); they're
-    // farm-type otherwise. `forcePot` makes useLSP/fightTarget treat them like a timed.
-    const forcePot = !!(t.timer || t.quest || t.dungeonBoss);
+    // `forcePot` = drink potions unconditionally (like a timed boss), ignoring the farm
+    // toggle. Timed + dungeon bosses always do. Quest mobs USED to force it too, but that
+    // drained potions on quest mobs even when the user had "Stamina potions while farming"
+    // OFF (bug: quest mobs that coincide with farm mobs → potions spent). Now quests only
+    // force potions when that toggle is ON; otherwise they farm on natural stamina +
+    // level-up refills (harvest), same as any farm target. Boss timers are unaffected.
+    const forcePot = !!(t.timer || t.dungeonBoss || (t.quest && S.lspEnabled));
 
     for (const mob of alive) {
       if (paused || !running) break;
@@ -1212,6 +1503,44 @@ async function processDungeon(src) {
   save();
 }
 
+// ── PROCESS SINGLE BOSS (world/timed boss on battle.php?id=…) ──────────────────
+// One boss per source, added by scanning its own battle page. monster_id = the URL id.
+// Reads OUR current cumulative damage on the boss (#yourDamageValue) and attacks until it
+// reaches the configured value, then stops. Drinks potions like a timed boss, then loots.
+async function processSingle(src) {
+  const t = (src.targets || [])[0];
+  if (!t || t.enabled === false) return;
+  const idp = { monster_id: src.monster_id };
+  // Current cumulative damage on this boss, used ONLY to skip when already at target (so we
+  // don't keep poking it). Prefer the live page value, else the last total the fight recorded,
+  // else fetch once. The FIGHT itself tracks the server's authoritative totaldmgdealt, so a
+  // stale/absent seed here can't cause overshoot — worst case is one 1-stam probe hit.
+  let cur = null;
+  if (currentPageUrl() === srcUrl(src)) cur = readYourDamage(document);
+  if (cur == null && typeof src.lastTotal === 'number') cur = src.lastTotal;
+  if (cur == null) {
+    const html = await getHtml(srcUrl(src));
+    if (html) cur = readYourDamage(new DOMParser().parseFromString(html, 'text/html'));
+  }
+  cur = cur ?? 0;
+  if (cur >= t.dmgTarget) { status = `✓ ${shortName(src.label)} at target ${fmtDmg(t.dmgTarget)}`; return; }
+  if (stam < 1) {
+    if (t.useLSP) await useLSP(true);
+    if (stam < 1) { log(`no stamina — skip boss ${src.label}`, '#fa0'); return; }
+  }
+  log(`→ 🎯 ${src.label} (you: ${fmtDmg(cur)} → target ${fmtDmg(t.dmgTarget)}) stam:${stam}`, '#7df');
+  // knownStart=false: cur is only a seed for the initial gate. The fight reads the server's
+  // totaldmgdealt as the running total (self-correcting) and learns K cleanly on hit #2, so an
+  // inaccurate seed can't corrupt precision. exact=true → ≤1-stam overshoot. timer=true → drink.
+  const { dmg, reason } = await fightTarget(idp, src.label, cur, t.dmgTarget, t.useLSP, false, false, true, null, true, false);
+  src.lastTotal = dmg;   // remember the real total so we skip once it's at/over target
+  if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead') {
+    const r = await lootMob(idp);
+    log(`${reason === 'dead' ? '☠️' : '✓'} boss ${src.label} — ${fmtDmg(dmg)} / ${fmtDmg(t.dmgTarget)}${r ? ' · loot ✓' : ''}`, '#2f8');
+  }
+  save();
+}
+
 // ── PROCESS GUILD DUNGEON LOCATION (many .mon instances on one location page) ──
 // Instances respawn with NEW dgmids, so we can't hardcode them: each pass we re-read
 // the location page, loot the dead matching instances, then fight each alive matching
@@ -1225,17 +1554,25 @@ async function processDungeonLocation(src) {
   // ~twice a second (the main loop only sleeps 600ms while stamina is left) and hammer
   // the server. While cached we just skip the pass.
   //   • normal targets        → 12s (gentle, the room isn't time-critical)
-  //   • 🏰 dungeon boss armed  → DUNGEON_BOSS_POLL (~3s) so we SEE the room open fast
+  //   • 🏰 dungeon boss armed  → DUNGEON_BOSS_POLL (~3s) so we SEE the room open fast,
+  //     but ONLY while the last read had something alive: an empty room / unspawned boss
+  //     backs off to 15s (before: 9 location pages hammered every 3s for hours).
   const hasBoss   = targets.some(t => t.dungeonBoss);
-  const readEvery = hasBoss ? DUNGEON_BOSS_POLL : 12_000;
   const now = Date.now();
   const hit = _dlCache[src.id];
+  const prevAlive = !hit || hit.mons.some(m => !m.dead);
+  const readEvery = hasBoss ? (prevAlive ? DUNGEON_BOSS_POLL : 15_000) : 12_000;
   let mons;
   if (hit && now - hit.ts < readEvery) {
     mons = hit.mons;
   } else {
     status = `fetch 🏰 ${src.label}…`; renderUI();
-    const html = await getHtml(srcUrl(src));
+    const locUrl = await dungeonLocUrl(src);
+    if (!locUrl) {   // today's dungeon of this type isn't open (or already looted) → nothing to farm
+      if (S.debug) log(`🏰 ${src.label}: today's instance not open/looted — skip`, '#558');
+      return;
+    }
+    const html = await getHtml(locUrl);
     if (!html) return;
     parseStam(html);
     mons = parseDungeonMons(html);
@@ -1271,7 +1608,8 @@ async function processDungeonLocation(src) {
     // are SHARED damage targets that don't die from our hit, so loot fails and they stay
     // "alive" — without this skip the same mob got re-fought every pass and kept dealing
     // damage FAR past the configured target ("continua a fare danno sopra i 200M").
-    const alive = mons.filter(m => !m.dead && fn(m) && !isLooted(m.dgmid) &&
+    const alive = mons.filter(m => !m.dead && fn(m) && !dungeonDone(m.dgmid, t.dmgTarget) &&
+      (!_dlRetryAt[m.dgmid] || Date.now() >= _dlRetryAt[m.dgmid]) &&
       (t.killLimit === null || (S.kills[m.name] || 0) < t.killLimit));
     for (const m of alive) {
       if (paused || !running) break;
@@ -1279,22 +1617,96 @@ async function processDungeonLocation(src) {
         if (t.useLSP) await useLSP(t.timer || t.dungeonBoss);
         if (stam < 1) { log(`no stamina — stop 🏰 ${t.key}`, '#fa0'); return; }
       }
-      log(`⚔️ attacking 🏰 ${m.name} → target ${fmtDmg(t.dmgTarget)} · 🔋${stam}`, '#7df');
+      // resume from the damage we've already dealt (so RAISING the cap only adds the delta,
+      // never re-does the whole target). 0 for a fresh mob.
+      const already = capDmgOf(m.dgmid);
+      log(`⚔️ attacking 🏰 ${m.name} → target ${fmtDmg(t.dmgTarget)}${already ? ` (from ${fmtDmg(already)})` : ''} · 🔋${stam}`, '#7df');
       const idp = { dgmid: m.dgmid, instance_id: m.instance_id };
       // dungeonBoss → exact tiers + drink unconditionally + HARD CAP (never cross the guild limit).
-      const { dmg, reason } = await fightTarget(idp, m.name, 0, t.dmgTarget, t.useLSP, false, false, !!t.exact || !!t.dungeonBoss, null, t.timer || t.dungeonBoss, !!t.dungeonBoss);
-      if (reason === 'done' || dmg >= t.dmgTarget || reason === 'dead' || reason === 'cap') {
+      const { dmg, reason } = await fightTarget(idp, m.name, already, t.dmgTarget, t.useLSP, false, false, !!t.exact || !!t.dungeonBoss, null, t.timer || t.dungeonBoss, !!t.dungeonBoss);
+      // DROP RULE: a threshold mob must CROSS the target to drop. If we exited UNDER it
+      // (out of stamina, interrupted, or a genuine 0-dmg stall), do NOT claim it — retry
+      // next cycle so the next hit's cumulative totaldmgdealt crosses the line ("2B + spiccioli").
+      // Only give up (claim without a drop) after 3 consecutive GENUINE per-player-cap stalls,
+      // so a truly undamageable mob can't loop forever burning stamina.
+      const reached = dmg >= t.dmgTarget || reason === 'dead';
+      let giveUp = false;
+      if (!reached && reason === 'cap') { _dlCapTries[m.dgmid] = (_dlCapTries[m.dgmid] || 0) + 1; giveUp = _dlCapTries[m.dgmid] >= 3; }
+      delete _dlCache[src.id];   // state changed → re-read the page next pass
+      // ZERO-DAMAGE stall = the mob isn't attackable AT ALL yet (boss not spawned, lane
+      // still locked) — NOT a per-player cap. Marking it "done at target" here poisoned
+      // the REAL boss for 18h once it spawned ("vuole attaccare il boss che non è ancora
+      // uscito, poi non lo fa più"). Instead: back off 5 min and retry, nothing recorded.
+      if (giveUp && dmg <= already) {
+        delete _dlCapTries[m.dgmid];
+        _dlRetryAt[m.dgmid] = Date.now() + 5 * 60_000;
+        log(`⏳ 🏰 ${m.name}: not attackable yet (unspawned/locked) — retry in 5m`, '#fa0');
+      } else if (reached || giveUp) {
+        delete _dlCapTries[m.dgmid];
         const r = await lootMob(idp);
-        lootedAdd(m.dgmid);   // claimed (persisted) → won't be re-fought even after a reload
+        // Record HOW FAR we got so we don't re-fight it — but resumably, keyed on the target:
+        //  • real kill        → permanent looted flag (dead-loot dedup)
+        //  • genuine server cap (can't damage more, still under target) → mark as done AT the
+        //    current target (skipped now; RAISING the cap re-probes it, self-limiting via giveUp)
+        //  • reached our target → remember the real dmg (RAISING the cap re-attacks only the delta)
+        if (reason === 'dead') lootedAdd(m.dgmid);
+        else if (giveUp)       capDmgAdd(m.dgmid, t.dmgTarget);
+        else                   capDmgAdd(m.dgmid, dmg);
         if (r !== null && t.killLimit !== null) S.kills[m.name] = (S.kills[m.name] || 0) + 1;
-        delete _dlCache[src.id];   // state changed → re-read the page next pass
         const loot = r !== null ? fmtLoot(r) : null;
-        const tag  = reason === 'dead' ? '☠️' : reason === 'cap' ? '🛑' : '✅';
-        const col  = reason === 'cap' ? '#fa0' : '#2f8';
-        log(`${tag} 🏰 ${m.name} — ${fmtDmg(dmg)} / target ${fmtDmg(t.dmgTarget)}${loot ? ` · 💰 ${loot}` : ''}`, col);
+        const tag  = reason === 'dead' ? '☠️' : (!reached ? '🛑' : '✅');
+        const col  = !reached ? '#fa0' : '#2f8';
+        log(`${tag} 🏰 ${m.name} — ${fmtDmg(dmg)} / target ${fmtDmg(t.dmgTarget)}${!reached ? ' (capped · no drop)' : ''}${loot ? ` · 💰 ${loot}` : ''}`, col);
+      } else {
+        log(`↻ 🏰 ${m.name} at ${fmtDmg(dmg)}/${fmtDmg(t.dmgTarget)} (${reason}) — finishing next cycle`, '#fa0');
       }
       save();
     }
+  }
+}
+
+// ── CUBE AUTO (multibox) ──────────────────────────────────────────────────────
+// A scanned cube source is pinned to the lanes + mob roster of the cube that was
+// SCANNED — the next Polyhedral Crucible has different linked_location_ids and
+// different mobs, so every new cube silently stopped being farmed until a manual
+// re-scan + re-tick ("nuovo cubo non rilevato"). AUTO mode stores NO lane info:
+// each pass it resolves TODAY's instance (fresh "Enter" link via
+// resolveDungeonInstances → byType.cube), reads the node state embedded in
+// guild_dungeon_cube.php, and farms every open pve/boss lane through the normal
+// dungeonloc path. The src TARGETS ride along unchanged — the seed builds one
+// per-mob target with its OWN hard cap (name-matched, lane-agnostic), plus an
+// optional wildcard fallback; a single shared cap violated per-mob guild rules.
+// Lanes the vices open mid-run are picked up on the next node read.
+const CUBE_NODES_TTL = 60_000;
+const _cubeNodes = { ts: 0, inst: null, lanes: [] };
+async function cubeOpenLanes() {
+  const map = await resolveDungeonInstances();
+  const inst = map.cube?.instanceId;
+  if (!inst) return { inst: null, lanes: [] };
+  if (_cubeNodes.inst === inst && Date.now() - _cubeNodes.ts < CUBE_NODES_TTL) return _cubeNodes;
+  const html = await getHtml(`${BASE}/guild_dungeon_cube.php?instance_id=${inst}`);
+  if (!html) return _cubeNodes.inst === inst ? _cubeNodes : { inst, lanes: [] };
+  const nm = html.match(/"nodes":(\[\{"id":\d[\s\S]*?\}\]),"selected_node_id"/);
+  let nodes = [];
+  try { nodes = JSON.parse(nm[1]); } catch { nodes = []; }
+  // pve lanes + the apex boss gate are all ordinary guild_dungeon_location.php pages
+  const lanes = [...new Set(nodes
+    .filter(n => (n.type === 'pve' || n.type === 'boss') && n.status === 'available' &&
+                 n.linked_location_id && n.monsters_left > 0)
+    .map(n => String(n.linked_location_id)))];   // dedupe: nodes can share a linked location
+  Object.assign(_cubeNodes, { ts: Date.now(), inst, lanes });
+  return _cubeNodes;
+}
+async function processCubeAuto(src) {
+  const { inst, lanes } = await cubeOpenLanes();
+  if (!inst) { if (S.debug) log('🧊 cube: no open instance today — skip', '#558'); return; }
+  if (!lanes.length) { if (S.debug) log('🧊 cube: no open lanes with monsters left — skip', '#558'); return; }
+  for (const loc of lanes) {
+    if (paused || !running) break;
+    // synthesized per-lane dungeonloc source: same wildcard target + hard cap; the
+    // per-lane id keeps _dlCache throttling separate; dungeonLocUrl re-resolves the instance.
+    await processDungeonLocation({ ...src, cubeAuto: false, id: `dl-cubeauto-${loc}`,
+      location_id: loc, label: `🧊 Cube·L${loc}` });
   }
 }
 
@@ -1314,11 +1726,44 @@ const QUEST_DMG  = 5_000_000;            // default min damage per mob (quests a
 const QUEST_INTERVAL = 20_000;           // how often we re-read the guild page
 let _lastQuest = 0;
 let _questCooldowns = [];                 // [{title, ts}] cooldown quests tracked for the UI
+let _questMobDieTimes = {};              // monster_id → client-clock death ts (s) from battle.php
+
+// ── BATTLE PASS HUNT CHECK ─────────────────────────────────────────────────────
+// Reads battle_pass.php once per hour and checks "Lizards / Sea Beasts / Olympian
+// Monsters Hunt" progress. When have >= need the bpAuto source is skipped in the
+// farm loop (wave.id === 'bp-hunt'). S._bpDone persists so a completed hunt stays
+// skipped across restarts without re-fetching immediately.
+const BP_URL           = `${BASE}/battle_pass.php`;
+const BP_CHECK_INTERVAL = 3_600_000;   // re-check every hour
+let _lastBpCheck = 0;
+
+async function checkBpHunt() {
+  if (!S.config || !S.config.some(s => s.id === 'bp-hunt')) return; // bpAuto not injected
+  if (Date.now() - _lastBpCheck < BP_CHECK_INTERVAL && S._bpNeed != null) return;
+  _lastBpCheck = Date.now();
+  const html = await getHtml(BP_URL);
+  if (!html) return;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  for (const row of doc.querySelectorAll('.quest')) {
+    const title = (row.querySelector('strong')?.textContent || '').toUpperCase();
+    if (!/LIZARD|SEA BEAST|OLYMPIAN/i.test(title)) continue;
+    const m = (row.querySelector('.muted:last-child, .muted:last-of-type')?.textContent || '').match(/(\d[\d,]*)\s*\/\s*(\d[\d,]*)/);
+    if (!m) break;
+    const have = parseInt(m[1].replace(/,/g, ''));
+    const need = parseInt(m[2].replace(/,/g, ''));
+    const done = have >= need;
+    if (S._bpHave !== have || S._bpNeed !== need) {
+      S._bpHave = have; S._bpNeed = need; S._bpDone = done; save();
+      log(`🎫 BP hunt: ${have}/${need}${done ? ' ✅ completato — salto lizardman' : ` (${need - have} mancanti)`}`, done ? '#2f8' : '#9cf');
+    }
+    break;
+  }
+}
 
 const _qid = el => parseInt((el.getAttribute('onclick') || '').match(/\((\d+)/)?.[1] || '0');
 
 // the monster a quest targets: req-text "Monster: X" → desc "Kill N X while …" →
-// "from (a) defeated X". null = unknown → farm ALL g5w9 mobs (covers gather quests).
+// "from (a/the/defeated) X" → title keyword fallback.
 function questMonster(row) {
   const req = row.querySelector('.quest-req-text')?.textContent || '';
   let m = req.match(/Monster:\s*([^·\n]+?)\s*(?:·|$)/i);
@@ -1326,14 +1771,57 @@ function questMonster(row) {
   const desc = row.querySelector('.quest-main-desc')?.textContent || '';
   m = desc.match(/Kill\s+\d+\s+(.+?)\s+while dealing/i);
   if (m) return m[1].trim().toLowerCase();
-  m = desc.match(/from (?:a )?defeated\s+([A-Za-z' ]+?)(?:[.,]|\s+so\b|$)/i);
+  // gather quests: "from (a/an/the/defeated) X" at end of sentence — handle all articles
+  m = desc.match(/\bfrom (?:(?:a|an|the|defeated)\s+)*([A-Za-z][A-Za-z' ]+?)[\s.,!]*$/im);
   if (m) return m[1].trim().toLowerCase();
+  // fallback: infer from quest title keywords (for gather quests with unusual phrasing)
+  const title = (row.querySelector('.quest-main-title')?.textContent || '').toLowerCase();
+  if (/orc/i.test(title))    return 'orc';
+  if (/goblin/i.test(title)) return 'goblin';
+  if (/lizard/i.test(title)) return 'lizardman';
+  if (/troll/i.test(title))  return 'troll';
   return null;
 }
 function questMinDmg(row) {
-  const m = (row.querySelector('.quest-req-text')?.textContent || '').match(/min\s*([\d,]+)\s*dmg/i);
-  const n = m ? parseInt(m[1].replace(/,/g, '')) : 0;
+  // req-text format: "min 5m dmg" or "min 5,000,000 dmg" — handle both K/M/B suffixes and plain digits
+  const m = (row.querySelector('.quest-req-text')?.textContent || '').match(/min\s*([\d,.]+)\s*([kmb])?\s*dmg/i);
+  if (!m) return QUEST_DMG;
+  const n = Math.round(parseFloat(m[1].replace(/,/g, '')) * ({'k':1e3,'m':1e6,'b':1e9}[(m[2]||'').toLowerCase()] || 1));
   return n > 0 ? n : QUEST_DMG;
+}
+// Item-gather quest: description uses "Gather/Collect/Bring/Obtain/Deliver", OR (reliable
+// fallback) no "min X dmg" requirement — kill quests always have one (format: "min 5m dmg").
+// NOTE: "Bring down the monster" in quest lore text would wrongly trigger "Bring" → also
+// check that the description is NOT a kill quest via "Kill N <monster>" to avoid false positives.
+function questIsGather(row) {
+  const desc = row.querySelector('.quest-main-desc')?.textContent || '';
+  // Reliable kill-quest indicator: "Kill N <Monster>" appears in the description body.
+  if (/\bKill\s+\d+\b/i.test(desc)) return false;
+  if (/\b(?:Gather|Collect|Obtain|Deliver)\b/i.test(desc)) return true;
+  // "Bring" alone is ambiguous ("Bring down the beast" vs "Bring 10 pelts") — only treat as
+  // gather when it's followed by a quantity ("Bring 10", "Bring us X amount").
+  if (/\bBring\s+\d+/i.test(desc)) return true;
+  const req = row.querySelector('.quest-req-text')?.textContent || '';
+  // req-text has "min Xm dmg" for kill quests; parse with suffix so "5m" matches correctly.
+  return !/min\s*[\d,.]+\s*[kmb]?\s*dmg/i.test(req);
+}
+// GATHER quests deliver an ITEM, not a kill: the mob drops it into the inventory and you must
+// DONATE it to the Guild (adventurers_donate_gather.php {quest_id,item_id}) to credit progress.
+// The item name comes from the req-text ("Gather 2x item(s) · Item: Goblin Essence") → "Goblin
+// Essence"; fallback: the description ("Collect N X from …"). Used to match the inventory card.
+function questItem(row) {
+  const req = row.querySelector('.quest-req-text')?.textContent || '';
+  let m = req.match(/Item:\s*([^·\n]+?)\s*(?:·|$)/i);
+  if (m) return m[1].trim();
+  const desc = row.querySelector('.quest-main-desc')?.textContent || '';
+  m = desc.match(/(?:Gather|Collect|Obtain|Bring)\s+\d+x?\s+(?:vials?\s+of\s+|pieces?\s+of\s+|samples?\s+of\s+)?([A-Za-z][A-Za-z' ]+?)(?:\s+from|[.,]|$)/i);
+  return m ? m[1].trim() : null;
+}
+// how many items a GATHER quest needs ("Gather 2x item(s)" → 2). Falls back to the progress bar.
+function questGatherNeed(row) {
+  const req = row.querySelector('.quest-req-text')?.textContent || '';
+  const m = req.match(/Gather\s+(\d+)\s*x/i);
+  return m ? parseInt(m[1]) : null;
 }
 
 // the single active quest (row carrying give-up/finish controls), or null
@@ -1344,11 +1832,13 @@ function parseActiveQuest(doc) {
     if (!fin && !giv) continue;
     const pm   = (row.querySelector('.quest-progress')?.textContent || '').match(/([\d,]+)\s*\/\s*([\d,]+)/);
     const have = pm ? parseInt(pm[1].replace(/,/g, '')) : 0;
-    const need = pm ? parseInt(pm[2].replace(/,/g, '')) : 10;
+    const gather = questIsGather(row);
+    const need = pm ? parseInt(pm[2].replace(/,/g, '')) : (gather ? (questGatherNeed(row) || 1) : 10);
     return {
       id: _qid(fin || giv), have, need,
       finishable: !!fin || (need > 0 && have >= need),
-      monster: questMonster(row), minDmg: questMinDmg(row),
+      monster: questMonster(row), minDmg: gather ? 0 : questMinDmg(row), gather,
+      item: gather ? questItem(row) : null,
       title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
     };
   }
@@ -1367,8 +1857,10 @@ function parseAvailableQuests(doc) {
     if (cdEl && parseInt(cdEl.getAttribute('data-cooldown-ts') || '0') > now) continue;
     const lim = row.textContent.match(/(\d+)\s*\/\s*\d+\s*remaining/i);
     if (lim && parseInt(lim[1]) <= 0) continue;
+    const gather = questIsGather(row);
     out.push({
-      id: _qid(acc), monster: questMonster(row), minDmg: questMinDmg(row),
+      id: _qid(acc), monster: questMonster(row), minDmg: gather ? 0 : questMinDmg(row), gather,
+      item: gather ? questItem(row) : null, need: gather ? (questGatherNeed(row) || 1) : 10,
       title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
     });
   }
@@ -1394,24 +1886,103 @@ async function fetchGuild() {
   return html ? new DOMParser().parseFromString(html, 'text/html') : null;
 }
 
+// A gather/kill quest whose creature is ALSO covered by the user's OWN farm config
+// (e.g. a low-level alt gathering "Orc Essence" from the very orcs it already farms on
+// g3w3) must NOT be redirected to the hardcoded g5w9 quest wave: that wave holds no such
+// mob for a low-level char, so the quest would never progress AND — worse — it would
+// reserve ALL the stamina and freeze the real farm ("preso una quest ma è ferma"). When
+// we detect the overlap we let Phase 2 farm the configured waves instead; the server
+// credits the quest (gather item / kill) as those very mobs are looted there.
+function questCoveredByConfig(q) {
+  if (!q) return false;
+  const monster = (q.monster || '').toLowerCase().trim();
+  if (!monster) return false;
+  const monWords = monster.split(/\s+/).filter(w => w.length >= 3 && w !== 'the' && w !== 'and');
+  if (!monWords.length) return false;
+  const targetWords = t => []
+    .concat(t.include || [], t.srcName ? [t.srcName] : [])
+    .flatMap(s => String(s).toLowerCase().split(/\s+/))
+    .filter(w => w.length >= 3);
+  // Kill quests: ALL name words must match (strict — avoid cross-mob mismatches).
+  // Gather quests: ANY word matches (lenient — "troll warriors" → any "troll" target qualifies).
+  const wordMatch = (t, w) => targetWords(t).some(tw => tw === w || tw.startsWith(w) || w.startsWith(tw));
+  const matches = (t) => q.gather ? monWords.some(w => wordMatch(t, w)) : monWords.every(w => wordMatch(t, w));
+  for (const wave of WAVES)
+    for (const t of (wave.targets || [])) {
+      if (!matches(t)) continue;
+      // TIMED target: Phase 1 already kills these on respawn — ALWAYS defer to it, never
+      // try g5w9 and never give up waiting. Return 'timed' so the caller can tell the
+      // difference (no have>0 guard needed: we just wait for the next respawn kill).
+      if (t.timer) return 'timed';
+      // Gather quests need no minimum damage — items drop on any kill, so any configured
+      // target for that mob type qualifies. Kill quests still require dmgTarget >= minDmg.
+      if (q.gather || (t.dmgTarget || 0) >= (q.minDmg || 0)) return true;
+    }
+  return false;
+}
+
 // a transient farm wave for the active quest's monster on g5w9. Unknown monster →
 // empty include = match ALL g5w9 mobs (so gather quests still progress). Core token
 // only (split on comma) so "Charybdis, Living Maelstrom" matches via "charybdis".
 function questWaveFor(q) {
-  const dmg = Math.round((q.minDmg || QUEST_DMG) * 1.02);   // tiny margin over the floor
+  // Gather quests: no minDmg; use a modest target so a low-level account can kill the mob.
+  // Kill quests: exact mode, must deal at least minDmg per mob.
+  const dmg = q.gather ? 100_000 : Math.round((q.minDmg || QUEST_DMG) * 1.02);
   const inc = q.monster ? [q.monster.split(',')[0].trim()] : [];
   return {
     id: 'quest', label: `Quest: ${q.title}`, url: QUEST_WAVE,
     targets: [{
       key: 'quest', label: q.monster || 'quest mobs', srcName: 'quest',
-      match: makeMatch(inc, []), dmgTarget: dmg, exact: true,
-      // quest:true → (1) always uses potions (like a timed boss, ignores the farm
-      // toggle) and (2) caps engagement at the quest's `need` so it never kills MORE
-      // mobs than required (the kill is credited at LOOT, so we engage exactly `need`
-      // distinct mobs and then just loot them as they die — see processWave).
-      killLimit: null, useLSP: 'asNeeded', timer: false, quest: true, enabled: true,
+      match: makeMatch(inc, []), dmgTarget: dmg,
+      // Gather: item drops are RNG (not 1 per kill) → DON'T cap kills at `need`, keep farming
+      // until enough items are collected+donated (the real stop is have>=need after delivery).
+      // Kill quests: exact mode, no killLimit.
+      exact: !q.gather, killLimit: null,
+      useLSP: 'asNeeded', timer: false, quest: true, enabled: true,
     }],
   };
+}
+
+// DELIVER (consegna) the gathered items to the Guild. Gather quests DON'T credit on kill: the
+// mob drops an item into the inventory and you must DONATE it (adventurers_donate_gather.php
+// {quest_id,item_id}, ONE item per call) to advance the progress bar. This is the step the bot
+// used to skip → gather quests stayed at 0/N forever. We read the inventory, match the required
+// item by NAME → its data-item-id (the endpoint's item_id), and donate as many as we still need.
+// Returns the number donated this pass. The guild re-read reconciles the authoritative progress.
+let _lastDonate = 0;
+async function donateGatherItems(q) {
+  if (!q || !q.gather || !q.item || !q.id) return 0;
+  if (Date.now() - _lastDonate < 12_000) return 0;   // throttle: drops trickle in — no need to hammer
+  _lastDonate = Date.now();
+  const html = await getHtml(`${BASE}/inventory.php`);
+  if (!html) return 0;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const want = q.item.toLowerCase().replace(/\s+/g, ' ').trim();
+  let itemId = null, have = 0;
+  for (const c of doc.querySelectorAll('[data-item-id]')) {
+    const raw = (c.querySelector('.item-name, [class*="name"], b, strong, h3, h4')?.textContent
+              || c.getAttribute('title') || c.textContent || '').toLowerCase();
+    const base = raw.replace(/\s*x\s*\d+\s*$/, '').replace(/\s+/g, ' ').trim();   // strip trailing "x12"
+    if (base === want || base.includes(want) || want.includes(base)) {
+      itemId = c.getAttribute('data-item-id');
+      have = parseInt((raw.match(/x\s*(\d+)/) || [])[1] || '1');
+      break;
+    }
+  }
+  if (!itemId || have <= 0) { dlog(`📦 quest: no "${q.item}" in inventory to deliver yet`, '#778'); return 0; }
+  const remaining = Math.max(1, (q.need || 1) - (q.have || 0));
+  const toDonate = Math.min(have, remaining);
+  let done = 0;
+  for (let i = 0; i < toDonate && running; i++) {
+    const r = await post('adventurers_donate_gather.php', { quest_id: q.id, item_id: itemId });
+    const okDonate = r && !r.error && (r.status === 'ok' || r.status === 'success'
+                      || r.success === true || r.ok === true || r.donated || r.progress != null);
+    if (okDonate) done++;
+    else break;   // out of items / server rejected → stop (guild re-read will re-sync)
+    await sleep(350);
+  }
+  if (done) { q.have = (q.have || 0) + done; log(`📦 delivered ${done}× ${q.item} → ${q.have}/${q.need}`, '#9cf'); save(); }
+  return done;
 }
 
 // Drive the Adventurer's Guild "di seguito": finish a completed quest → accept the
@@ -1442,16 +2013,25 @@ async function processQuests() {
         active = null;
       }
 
-      // 2) no active quest → accept the next available (off cooldown), then farm it
+      // 2) no active quest → accept the next available (off cooldown), then farm it.
+      // Quests we GAVE UP on (zero progress — mob unreachable for this account's level)
+      // are blacklisted for 24h so a low alt doesn't re-take the same impossible quest
+      // and freeze again ("account 4 le prende e si blocca perché non può attaccare").
       if (!active) {
-        const avail = parseAvailableQuests(doc);
+        const bl = S._questBlacklist || {};
+        // Class-only quests (e.g. "Skill Warm Up") require a class selected at LV200+.
+        // Skip them until the account reaches at least level 200.
+        const lvl = S.userLevel || 0;
+        const avail = parseAvailableQuests(doc)
+          .filter(p => !(bl[p.title] && Date.now() - bl[p.title] < 24 * 3600_000))
+          .filter(p => lvl >= 200 || !/skill warm.?up/i.test(p.title));
         if (avail.length) {
           const p = avail[0];
           const r = await post('adventurers_accept_quest.php', { quest_id: p.id });
           if (r && r.status === 'ok') {
             S.questTaken++;
-            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, have: 0, need: 10, engaged: 0 };
-            log(`📜 quest accepted: ${p.title}${p.monster ? ` → ${p.monster}` : ''} (min ${fmtDmg(p.minDmg)})`, '#9cf');
+            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, gather: p.gather, item: p.item, have: 0, need: p.need || 10, engaged: 0 };
+            log(`📜 quest accepted: ${p.title}${p.monster ? ` → ${p.monster}` : ''} ${p.gather ? `(gather ${p.need||'?'}× ${p.item||'item'})` : `(min ${fmtDmg(p.minDmg)})`}`, '#9cf');
           } else log(`quest accept failed (${p.title}): ${r?.message || 'no resp'}`, '#f66');
         } else {
           dlog(`quests: none available · ${_questCooldowns.length} on cooldown`, '#778');
@@ -1463,6 +2043,8 @@ async function processQuests() {
       if (active) {
         const prev = (S.questActive && S.questActive.id === active.id) ? (S.questActive.engaged || 0) : 0;
         active.engaged = Math.max(prev, active.have || 0);
+        // new quest (or first sight of it) → start its zero-progress clock (give-up guard)
+        if (!S.questActive || S.questActive.id !== active.id) S._questSince = Date.now();
       }
       S.questActive = active;   // cache for the UI + the farm pass below
       save();
@@ -1473,11 +2055,82 @@ async function processQuests() {
   // "pending" so the caller skips the waves until the quest slot is empty.
   const q = S.questActive;
   if (q && (q.have || 0) < (q.need || 10)) {
+    // GATHER quests: DELIVER whatever the mob already dropped into the inventory (this is what
+    // credits the progress bar — kills alone don't). Runs BEFORE the coverage check so it also
+    // works when the item mob is farmed via the user's own config waves. Throttled internally.
+    if (q.gather && q.item) {
+      await donateGatherItems(q);
+      // enough delivered → turn it in right now (don't wait for the 20s guild re-read)
+      if ((q.have || 0) >= (q.need || 1)) {
+        const rf = await post('adventurers_finish_quest.php', { quest_id: q.id });
+        if (rf && rf.status === 'ok') {
+          S.questDone++; S.questActive = null; save();
+          log(`🏅 quest done: ${q.title} (${q.have}/${q.need} delivered)`, '#2f8');
+          _lastQuest = 0;   // force a fresh guild read next pass → accept the next quest
+          return false;
+        }
+        // finish rejected → keep the quest; the guild re-read reconciles have and retries
+      }
+    }
+    // If the quest's creature is already in the user's farm config, let Phase 2 handle it —
+    // wave loots credit the quest automatically. Gather quests always qualify (no dmg floor);
+    // kill quests qualify only when the config's dmgTarget reaches the quest's minDmg.
+    const qcov = questCoveredByConfig(q);
+    if (qcov === 'timed') {
+      // Quest mob is a configured TIMED target — Phase 1 kills it on respawn.
+      // Never try g5w9, never give up: just wait for the next respawn cycle.
+      status = `📜 quest via timed: ${q.title} — waiting respawn`;
+      return false;
+    }
+    if (qcov) {
+      status = `📜 quest via farm: ${q.title}`;
+      return false;   // let the general farm run; loot on the configured wave credits it
+    }
+    // STALL GUARD A: zero engagement — mob not on g5w9 or below account's damage floor.
+    // After 3 fruitless passes (all zeroes) + 10 min → give up.
+    const noProgress = (q.engaged || 0) === 0 && (q.have || 0) === 0;
+    const sig = `${q.id}:${q.have || 0}:${q.engaged || 0}`;
+    if (S._questSig === sig) S._questStall = (S._questStall || 0) + 1;
+    else { S._questSig = sig; S._questStall = 0; }
+    if (noProgress && (S._questStall || 0) >= 3) {
+      if (Date.now() - (S._questSince || 0) > 10 * 60_000) {
+        const r = await post('adventurers_giveup_quest.php', { quest_id: q.id });
+        S._questBlacklist = S._questBlacklist || {};
+        S._questBlacklist[q.title] = Date.now();
+        S.questActive = null; save();
+        log(`🏳️ quest given up (${r?.status || 'no resp'}) — no progress in 10m, too hard for this account: ${q.title} (blacklisted 24h)`, '#fa0');
+        return false;
+      }
+      status = `📜 quest stalled: ${q.title} — farming waves instead`;
+      return false;
+    }
+    // STALL GUARD B: engaged mobs but `have` never credited — wrong mob type or server mismatch.
+    // Skip for gather quests: items drop with RNG on loot; 0 have after N kills is normal.
+    // For kill quests: if have stays 0 for 15 min while engaging → give up + blacklist.
+    if (!q.gather && (q.engaged || 0) > 0 && (q.have || 0) === 0) {
+      if (Date.now() - (S._questSince || 0) > 15 * 60_000) {
+        const r = await post('adventurers_giveup_quest.php', { quest_id: q.id });
+        S._questBlacklist = S._questBlacklist || {};
+        S._questBlacklist[q.title] = Date.now();
+        S.questActive = null; save();
+        log(`🏳️ quest given up (${r?.status || 'no resp'}) — engaging mobs but 0 credits in 15m (item quest?): ${q.title} (blacklisted 24h)`, '#fa0');
+        return false;
+      }
+    }
+    // Fully engaged and nobody dead yet → DON'T idle on the quest wave: remember the
+    // death cooldown (S._questNextDie, from the cards' data-expire), farm elsewhere,
+    // and come back to loot right after the first engaged mob dies. (User: "attacca i
+    // mob e ricorda il cooldown di morte, nel frattempo fa altro e poi torna a lootare".)
+    if (!q.gather && (q.engaged || 0) >= (q.need || 10) && S._questNextDie && Date.now() < S._questNextDie + 1500) {
+      status = `📜 quest ${q.have || 0}/${q.need || 10} — next kill in ${fmt(S._questNextDie - Date.now())} · farming meanwhile`;
+      return false;
+    }
     status = `📜 quest: ${q.title}`;
     await processWave(questWaveFor(q), null, true);
-    // Reserve stamina (skip the farm pass) ONLY while we still need to ENGAGE more
-    // quest mobs. Once `need` of them are engaged we're just waiting for the loot to
-    // credit (have → need) — don't idle on the quest wave, let Phase 2 farm run.
+    // GATHER: item drops are RNG → keep the stamina on the quest wave until enough items are
+    // collected AND delivered (have>=need, checked by the top guard). KILL: reserve stamina only
+    // while we still need to ENGAGE more mobs; once `need` are engaged just wait for the credit.
+    if (q.gather) return true;
     return (q.engaged || 0) < (q.need || 10);
   }
   // an active-but-finishable quest is turned in on the next read → still pending
@@ -1749,7 +2402,16 @@ function pvpPick(state, myTurns) {
   // (Slash 0, Ironclad/War Aura 6, Power Slash 9, Ragnarok 15). Slash GRATIS = builder che carica
   // Rage E lascia rigenerare i token. La Rage (0-100, +25/turno) si AZZERA dopo 100 se non spesa.
   const tokens = Number(me.tokens) || 0;
-  const skills = me.skills || [];
+  // ALLOW-LIST (utente): quando è attiva, il bot vede SOLO le skill spuntate → tutta la logica a
+  // valle (usable/slash/nuke/filler…) sceglie automaticamente solo tra quelle. Serve a farmare gli
+  // achievement ("usa 20× skill X"): spunta la/le skill volute (tieni un builder per non stallare).
+  // Se il match non espone nessuna delle skill consentite, NON filtriamo (evita di bloccare il turno).
+  let skills = me.skills || [];
+  if (S.pvp.restrictSkills && (S.pvp.allowSkills || []).length) {
+    const allow = new Set(S.pvp.allowSkills.map(x => String(x).toLowerCase()));
+    const flt = skills.filter(k => allow.has(String(k.name || '').toLowerCase()));
+    if (flt.length) skills = flt;
+  }
   const enemy = Object.values(state.teams?.enemy?.players_by_num || {}).find(u => u.alive);
   if (!enemy) return null;
   const ehp = enemy.hp || 1e9;
@@ -1808,8 +2470,13 @@ function pvpPick(state, myTurns) {
   // net-heala a HP basso (Blood Frenzy) e solo lui ha il setup War Aura. Le ALTRE classi (un amico che usa
   // l'AutoPvP — Assassin/Mage/Magic Knight…) NON devono tenere l'ultimate per il low-HP: il loro nuke
   // (Final Wish, Mana Collapse, Eclipse Sever…) va sparato a risorsa PIENA, subito. `zerk` separa i regimi.
-  const zerk = (nukeSk && /ragnarok/i.test(nukeSk.name || '')) ||
-               Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n));
+  // Se l'utente ha scelto la classe a mano (S.pvp.myClass) è quella a decidere: solo BERSERKER usa la
+  // strategia combo-a-vita-bassa; TUTTE le altre classi giocano la linea generica (nuke a risorsa piena,
+  // cura sotto il 35%, para il nuke nemico, miglior colpo affordable come filler). Senza scelta manuale
+  // ricadiamo sul rilevamento storico (kit con Ragnarok) come prima.
+  const zerk = S.pvp.myClass ? (S.pvp.myClass === 'Berserker')
+             : ((nukeSk && /ragnarok/i.test(nukeSk.name || '')) ||
+                Object.keys(S.pvp.db.my).some(n => /ragnarok/i.test(n)));
 
   // RACE MODE — contro nemici VELOCI/bursty o che storicamente ti battono a DPS (`out-damaged`,
   // es. l'Assassino): NON rallentare con Slash (45k) come filler né sprecare turni in Ironclad.
@@ -2058,6 +2725,11 @@ async function pvpLoop() {
       _pvpStale = 0;
       const enemyU = Object.values(s.teams?.enemy?.players_by_num || {})[0];
       S.pvp.lastClass = enemyU?.advanced_class_name || '';
+      // impara il MIO kit dal vivo (nomi skill) → popola le checkbox dell'allow-list col kit reale
+      const myU = Object.values(s.teams?.ally?.players_by_num || {})[0];
+      S.pvp.detectedClass = myU?.advanced_class_name || S.pvp.detectedClass || '';
+      const kitNow = (s.me?.skills || myU?.skills || []).map(k => k.name).filter(Boolean);
+      if (kitNow.length) { const set = new Set([...(S.pvp.myKit || []), ...kitNow]); S.pvp.myKit = [...set]; }
       // scegli UNA volta per match la modalità di filler imparata per questa classe (stabile fino a fine match)
       if (_pvpModeMid !== S.pvp.cur) { _pvpModeMid = S.pvp.cur; S.pvp.curMode = pvpChooseFiller(S.pvp.lastClass || 'Unknown'); }
       pvpLearn(S.pvp.cur, s, s.new_logs);
@@ -2141,6 +2813,15 @@ function renderPvp() {
   }).join('');
   const recent = (p.matches || []).slice(-6).reverse().map(m =>
     `<span title="${esc((m.enemyClass || '') + (m.reason ? ' · ' + m.reason : ''))}" style="color:${m.winner === 'ally' ? '#2f8' : '#f88'};cursor:help">${m.winner === 'ally' ? 'W' : 'L'}</span>`).join(' ');
+  // ── la MIA classe (scelta a mano) + allow-list delle skill (per achievement) ──
+  const classOpts = ['<option value="">— pick your class —</option>']
+    .concat(PVP_CLASSES.map(c => `<option value="${c}" ${p.myClass === c ? 'selected' : ''}>${c}</option>`)).join('');
+  const kitSkills = [...new Set([...(PVP_KITS[p.myClass] || []), ...(p.myKit || [])])];
+  const allowSet = new Set((p.allowSkills || []).map(x => String(x).toLowerCase()));
+  const skillBoxes = kitSkills.length
+    ? kitSkills.map(nm => `<label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;margin:1px 8px 2px 0;color:${p.restrictSkills ? '#cde' : '#667'}">
+        <input type="checkbox" data-act="pvpskill" data-skill="${esc(nm)}" ${allowSet.has(nm.toLowerCase()) ? 'checked' : ''} ${p.restrictSkills ? '' : 'disabled'}>${esc(nm)}</label>`).join('')
+    : '<span style="color:#667;font-size:10px">pick your class above (or play a match) to see your kit\'s skills</span>';
   return `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <button data-pvp-action="toggle" style="flex:1;border:none;border-radius:6px;padding:7px 0;cursor:pointer;
@@ -2150,6 +2831,20 @@ function renderPvp() {
     <div style="color:${p.enabled ? '#7df' : '#888'};font-size:11px;margin-bottom:7px">
       ${p.enabled ? '▶ auto-playing (matchmake + max damage)' : '⏸ manual — play by hand'}
       ${p.note ? `· <span style="color:#fa8">${esc(p.note)}</span>` : ''}</div>
+
+    <div style="border:1px solid #2a2a44;border-radius:6px;padding:6px 7px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+        <span style="font-size:11px;color:#9c6;font-weight:bold">🧬 My class</span>
+        <select data-act="pvpclass" style="flex:1;background:#1a1a2e;color:#cde;border:1px solid #3a3a5a;border-radius:4px;padding:3px 5px;font-size:11px">${classOpts}</select>
+      </div>
+      <div style="color:#667;font-size:10px;margin:-2px 0 6px">Drives the strategy: only <b>Berserker</b> holds its ultimate for &lt;50% HP; the other classes nuke at full resource, self-heal below 35% and brace the enemy nuke.${p.detectedClass ? ` <span style="color:#586">(detected from match: ${esc(p.detectedClass)})</span>` : ''}</div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cde;margin-bottom:4px">
+        <input type="checkbox" data-act="pvprestrict" ${p.restrictSkills ? 'checked' : ''} style="transform:scale(1.15)">
+        🎯 Use ONLY the ticked skills <span style="color:#667">(for achievements like "use skill X 20×")</span>
+      </label>
+      <div style="line-height:1.7">${skillBoxes}</div>
+      ${p.restrictSkills && !(p.allowSkills || []).length ? '<div style="color:#fa8;font-size:10px;margin-top:3px">⚠ no skill ticked → the bot plays unrestricted. Tick at least one skill (keep a builder like Slash so it doesn\'t stall).</div>' : ''}
+    </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px">
       <div>🎟 tokens left: <b style="color:${(p.tokensAvail|0) > 0 ? '#0cf' : '#f66'}">${p.tokensAvail != null ? p.tokensAvail : '?'}</b></div>
@@ -2191,6 +2886,30 @@ function renderPvp() {
     </div>`;
 }
 
+// ── AUTOLEVEL: spend free stat points into STAMINA ──────────────────────────────
+// More stamina = more hits per cycle = faster leveling for a low-level alt. Mirrors
+// veyra_colab.allocate_stats: read v-points from stats.php, then POST stats_ajax.php
+// {action:allocate, stat:stamina, amount}. Throttled to once/min. Enabled by S.autolevel.
+let _lastStatAlloc = 0;
+async function allocateStats() {
+  if (Date.now() - _lastStatAlloc < 60_000) return;
+  _lastStatAlloc = Date.now();
+  try {
+    const html = await getHtml(`${BASE}/stats.php`);
+    if (!html) return;
+    const m = html.match(/id=["']v-points["'][^>]*>\s*([\d,]+)/i);
+    let pts = m ? parseInt(m[1].replace(/,/g, '')) : 0;
+    if (!pts || pts <= 0) return;
+    log(`🌱 autolevel: ${pts} free stat points → stamina`, '#9cf');
+    let guard = 0;
+    while (pts > 0 && running && !paused && guard++ < 50) {
+      const amt = Math.min(pts, 100);
+      await post('stats_ajax.php', { action: 'allocate', stat: 'stamina', amount: amt });
+      pts -= amt;
+    }
+  } catch (e) { dlog(`stat alloc error: ${e.message}`, '#f66'); }
+}
+
 async function mainLoop() {
   readStamFromDOM();
   let invLoaded = false;
@@ -2208,11 +2927,16 @@ async function mainLoop() {
     let questPending = false;
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
+      if (S.autolevel) await allocateStats();   // spend free stat points → stamina (throttled)
       // Phase 0 — guild dungeon bosses (battle.php?dgmid) — single boss per source
       for (const src of (S.config || [])) {
         if (paused || !running) break;
         if (src.kind === 'dungeon'    && src.enabled !== false) await processDungeon(src);
-        if (src.kind === 'dungeonloc' && src.enabled !== false) await processDungeonLocation(src);
+        if (src.kind === 'single'     && src.enabled !== false) await processSingle(src);
+        if (src.kind === 'dungeonloc' && src.enabled !== false) {
+          if (src.cubeAuto) await processCubeAuto(src);   // 🧊 lanes enumerated live, survives new cubes
+          else await processDungeonLocation(src);
+        }
       }
       // Phase 1 — timed bosses (priorità assoluta, usano stamina poi pozione)
       for (const wave of WAVES) {
@@ -2220,6 +2944,8 @@ async function mainLoop() {
         const timedTargets = wave.targets.filter(t => t.timer);
         if (timedTargets.length) await processWave(wave, timedTargets);
       }
+      // Phase 1.4 — Battle Pass hunt check (throttled 1h): skip bp-hunt source when done.
+      if (!paused && running) await checkBpHunt();
       // Phase 1.5 — Adventurer's Guild quests (accept → farm to target → finish → next,
       // consecutively). While a quest is pending it OWNS the stamina (LSP refills it).
       if (!paused && running) questPending = await processQuests();
@@ -2229,6 +2955,8 @@ async function mainLoop() {
       _timedInterrupt = false;
       if (!questPending) for (const wave of WAVES) {
         if (paused || !running || _timedInterrupt) break;
+        // Skip the BP lizard-hunt source when the seasonal quest is already complete.
+        if (wave.id === 'bp-hunt' && S._bpDone) continue;
         const farmTargets = wave.targets.filter(t => !t.timer);
         if (farmTargets.length) await processWave(wave, farmTargets, true);
       }
@@ -2521,16 +3249,26 @@ async function scanDungeonLocation(locUrl, liveDoc, label) {
   }
   const instId = lu.searchParams.get('instance_id');
   const locId  = lu.searchParams.get('location_id');
-  let src = S.config.find(w => w.kind === 'dungeonloc' && srcUrl(w) === url);
+  // Resolve the STABLE dungeon type for this instance so the source survives the daily
+  // instance rotation — and so re-scanning tomorrow updates the SAME source (matched by
+  // type+location), not a duplicate pinned to a dead instance URL.
+  let dType = null;
+  try {
+    const map = await resolveDungeonInstances(true);
+    for (const [t, v] of Object.entries(map)) if (String(v.instanceId) === String(instId)) { dType = t; break; }
+  } catch {}
+  let src = S.config.find(w => w.kind === 'dungeonloc' &&
+    ((dType != null && String(w.dungeonType) === String(dType) && String(w.location_id) === String(locId))
+     || srcUrl(w) === url));
   if (!src) {
     src = {
       id: 'dl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-      kind: 'dungeonloc', url, instance_id: instId, location_id: locId,
+      kind: 'dungeonloc', url, dungeonType: dType, instance_id: instId, location_id: locId,
       label: label || pageLabel(url) || ('Location ' + (locId || '')),
       enabled: true, targets: [],
     };
     S.config.push(src);
-  } else { src.url = url; src.instance_id = instId; src.location_id = locId; if (label) src.label = label; }
+  } else { src.url = url; if (dType != null) src.dungeonType = dType; src.instance_id = instId; src.location_id = locId; if (label) src.label = label; }
 
   const distinct = {};
   for (const m of mons) {
@@ -2589,6 +3327,35 @@ async function scanCurrentPage(btn) {
     save();
     log(`🏰 dungeon added: ${bossName} (dgmid ${dgmid}) — set the damage and press 💾`, '#9060ff');
     flashScan(`🏰 dungeon boss added: ${bossName} — set the damage & press 💾`);
+    return;
+  }
+
+  // ── SINGLE BOSS page: battle.php?id=… (world/timed boss with a leaderboard) ──
+  // No dgmid → a normal monster battle page. monster_id = the URL id; our running cumulative
+  // damage is in #yourDamageValue. Add a 'single' source the main loop attacks (Phase 0) up
+  // to the value you set, via the wave endpoints (user_join_battle / damage / loot).
+  // monster_id: the page's own BATTLE_CFG.id is the authoritative value it POSTs to damage.php
+  // (verified id === URL ?id for global bosses); fall back to the URL id if the global is absent.
+  const cfg = (typeof window !== 'undefined' && window.BATTLE_CFG) || null;
+  const singleId = (cfg && !cfg.isDungeon && cfg.id) ? String(cfg.id) : pu.searchParams.get('id');
+  if (singleId && pu.pathname.includes('battle.php')) {
+    const name = (document.querySelector('.card-title')?.textContent || document.title || `Boss ${singleId}`)
+                   .replace(/[🧟👑⚔️🎁\s]+/g, ' ').trim() || `Boss ${singleId}`;
+    const cur = readYourDamage(document);
+    let src = S.config.find(w => w.kind === 'single' && String(w.monster_id) === String(singleId));
+    if (src) { src.url = url; src.label = name; }
+    else {
+      src = {
+        id: 'b' + Date.now().toString(36), url, label: name, kind: 'single',
+        monster_id: singleId, enabled: true,
+        targets: [{ key: 'boss', label: name, srcName: name, include: [], exclude: [],
+                    dmgTarget: 3_000_000_000, useLSP: 'asNeeded', timer: true, enabled: true }],
+      };
+      S.config.push(src);
+    }
+    save();
+    log(`🎯 boss added: ${name} (id ${singleId})${cur != null ? ` · your dmg now ${fmtDmg(cur)}` : ''} — set the STOP damage & press 💾`, '#9060ff');
+    flashScan(`🎯 boss added: ${name} — set the stop damage & press 💾`);
     return;
   }
 
@@ -2758,6 +3525,10 @@ function renderSettings() {
         '🧪 Stamina potions while farming',
         'Timed bosses AND farming use potions',
         'Only timed bosses use potions — farming runs on natural stamina');
+  h += toggleRow('fspfallback', S.fspFallback,
+        '🥤 Use FSP when LSP runs out',
+        'When every LSP is gone, drink a Full Stamina Potion (item 35) instead of waiting',
+        'FSP stash is never touched — the bot waits for natural stamina once LSP is out');
   h += toggleRow('questenable', S.questEnabled,
         '📜 Auto Adventurer&apos;s Guild quests',
         'Accept a quest → farm its mob on g5w9 (≥5m each) → turn in → next',
@@ -2888,16 +3659,31 @@ function renderSettings() {
       ${srcLabel?`<div style="color:#556;font-size:9px;margin-top:3px">📄 ${esc(srcLabel)}</div>`:''}</div>`;
   };
 
+  // single boss (battle.php?id) source: one mob, an EXACT damage target, delete when done
+  const singleRow = (wi, w, srcLabel) => {
+    const t = (w.targets || [])[0];
+    return `<div style="border:1px solid #4a3a2a;border-radius:6px;padding:5px 6px;margin-bottom:5px;background:#0e0e18">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="flex:1;color:#f0b060;font-size:12px">🎯 ${esc((t&&t.label)||w.label)} <span style="color:#556;font-size:9px">id ${esc(w.monster_id)}</span></span>
+        <span style="color:#9cf;font-size:10px">do exactly</span>
+        <input style="${IN};width:74px" data-fld="dmg" data-wi="${wi}" data-name="${esc((t&&(t.srcName||t.label))||'')}" value="${esc(fmtDmg(t?t.dmgTarget:0))}" title="attack until YOUR total damage on this boss reaches this — near-exact (overshoot ≤ one 1-stamina hit)">
+        <button data-action="delwave" data-wi="${wi}" title="delete this boss target" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font:11px monospace">🗑</button>
+      </div>
+      <div style="color:#8a7a5a;font-size:9px;margin-top:3px;line-height:1.4">attacks this exact mob up to the damage above (potions on), then stops. 🗑 to remove when you're done.</div>
+      ${srcLabel?`<div style="color:#556;font-size:9px;margin-top:2px">📄 ${esc(srcLabel)}</div>`:''}</div>`;
+  };
+
   // ── SET TARGETS — every configured target, grouped by type ──────────────────────
-  const groups = { timed: [], dungeonboss: [], farm: [] };
+  const groups = { timed: [], single: [], dungeonboss: [], farm: [] };
   S.config.forEach((w, wi) => {
+    if (w.kind === 'single')  { groups.single.push({ single: true, wi, w }); return; }
     if (w.kind === 'dungeon') { groups.dungeonboss.push({ dungeon: true, wi, w }); return; }
     for (const t of (w.targets || [])) {
       const mode = t.dungeonBoss ? 'dungeonboss' : (t.timer ? 'timed' : 'farm');
       groups[mode].push({ wi, w, name: t.srcName || t.label, boss: !!t.timer });
     }
   });
-  const totalSet = groups.timed.length + groups.dungeonboss.length + groups.farm.length;
+  const totalSet = groups.timed.length + groups.single.length + groups.dungeonboss.length + groups.farm.length;
 
   h += `<div style="color:#9cf;font-size:11px;font-weight:bold;margin:6px 0 5px">📋 Set targets <span style="color:#556;font-weight:normal">· ${totalSet}</span></div>`;
   if (!totalSet) {
@@ -2910,18 +3696,20 @@ function renderSettings() {
       let s = `<div style="color:${col};font-size:11px;font-weight:bold;margin:8px 0 4px">${icon} ${title} <span style="color:#556;font-weight:normal">· ${arr.length}</span></div>`;
       for (const e of arr) {
         const lbl = multiPage ? (e.w.label || pageLabel(srcUrl(e.w))) : '';
-        s += e.dungeon ? dungeonRow(e.wi, e.w, lbl)
+        s += e.single  ? singleRow(e.wi, e.w, lbl)
+           : e.dungeon ? dungeonRow(e.wi, e.w, lbl)
                        : targetRow(e.wi, e.w, e.name, e.boss, null, lbl);
       }
       return s;
     };
     h += groupBlock('timed',       '⏰', 'Timed bosses',   '#fab');
+    h += groupBlock('single',      '🎯', 'Boss (exact dmg)', '#f0b060');
     h += groupBlock('dungeonboss', '🏰', 'Dungeon bosses', '#c9a0ff');
     h += groupBlock('farm',        '🎯', 'Farm',           '#7df');
   }
 
   // ── SCAN RESULTS — monsters found on the CURRENT page that aren't set yet ────────
-  const curSrc = S.config.find(w => w.kind !== 'dungeon' && srcUrl(w) === curUrl);
+  const curSrc = S.config.find(w => w.kind !== 'dungeon' && w.kind !== 'single' && srcUrl(w) === curUrl);
   const curWi  = curSrc ? S.config.indexOf(curSrc) : -1;
   const scanList = curSrc ? (_scan[curSrc.id] || []) : [];
   const toAdd = curSrc ? scanList.filter(r => !targetFor(curSrc, r.name)) : [];
@@ -3013,9 +3801,22 @@ function wireSettings() {
   uiContent.onchange = e => {
     const el = e.target, a = el.dataset.act; if (!a) return;
     if (a === 'lspenable')  { S.lspEnabled  = el.checked; save(); renderSettings(); return; }
+    if (a === 'fspfallback'){ S.fspFallback = el.checked; save(); renderSettings(); return; }
     if (a === 'questenable'){ S.questEnabled= el.checked; save(); renderSettings(); return; }
     if (a === 'debuglog')   { S.debug       = el.checked; save(); renderSettings(); return; }
     if (a === 'manaenable') { S.manaEnabled = el.checked; save(); renderSettings(); return; }
+    // ⚔ PvP: classe scelta a mano + allow-list skill
+    if (a === 'pvpclass')   { S.pvp.myClass = el.value; save(); renderUI(); log(`⚔ PvP: my class = ${el.value || 'auto'}`, '#ff5c8a'); return; }
+    if (a === 'pvprestrict'){ S.pvp.restrictSkills = el.checked; save(); renderUI(); log(`⚔ PvP: skill allow-list ${el.checked ? 'ON' : 'OFF'}`, '#ff5c8a'); return; }
+    if (a === 'pvpskill')   {
+      const nm = el.dataset.skill || '';
+      const set = new Set((S.pvp.allowSkills || []).map(x => String(x).toLowerCase()));
+      if (el.checked) set.add(nm.toLowerCase()); else set.delete(nm.toLowerCase());
+      // ricostruisci con i nomi originali (case corretto) dal kit
+      const kit = [...new Set([...(PVP_KITS[S.pvp.myClass] || []), ...(S.pvp.myKit || [])])];
+      S.pvp.allowSkills = kit.filter(k => set.has(k.toLowerCase()));
+      save(); renderUI(); return;
+    }
     const w = wave(el.dataset.wi); if (!w) return;
     const nm = el.dataset.name;
     if (a === 'wave-enable') {
@@ -3431,7 +4232,7 @@ function init() {
   try { parseLevel(document.body.innerHTML); } catch {}   // seed LV/EXP from the live page header
   renderUI();
   keepAwake();            // mobile: keep the screen on while the tab is in the foreground
-  log(`🔧 Veyra Farm v1.68.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
+  log(`🔧 Veyra Farm v1.78.0 — ${paused ? '⏸ PAUSED (manual play — press ▶ to start farming)' : '▶ running'} · quests ${S.questEnabled?'ON':'OFF'} · auto-heal ${S.hpHealPct>0?`≤${S.hpHealPct}%`:'OFF'}`, '#9cf');
   dlog(`debug: precise tiers ≤x100 on threshold targets, free on farm trash · LSP(251) only (FSP never touched) · view cookies hide_dead=${getCookieRaw('hide_dead_monsters')} bossOnly=${getCookieRaw('show_dead_bosses_only')} · console: copy(window.__farmLog())`, '#778');
   // DIAGNOSTIC: dump the LIVE runtime targets (what the loop actually uses) so a
   // stale/duplicate dmgTarget is visible. console: copy(window.__farmConfig())
