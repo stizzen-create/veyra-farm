@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.78.1
+// @version      1.78.2
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -4093,6 +4093,12 @@ function buildUI() {
       } catch (e) { log('⚔ export failed: ' + e.message, '#f88'); }
     }
   });
+
+  // Wire the delegated change/input/click handlers ONCE at init. Prima venivano
+  // assegnati SOLO dentro renderSettings()→wireSettings(): se l'utente non apriva mai
+  // la tab ⚙ Settings, uiContent.onchange restava null → il dropdown "🧬 My class" del
+  // PvP (e le checkbox skill/restrict) non reagivano ("dropdown lockato su Archer").
+  wireSettings();
 
   // restore saved position (left/top) if the panel was dragged before
   if (S.pos && S.pos.left != null) {
