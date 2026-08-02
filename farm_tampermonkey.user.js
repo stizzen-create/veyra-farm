@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.78.2
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g5w9→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob
+// @version      1.79.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g3w5→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -181,9 +181,9 @@ const defState = () => ({
   manaEnabled: false,   // checkbox Setup (default OFF)
   manaPots: 500,        // quante pozioni di mana usare (budget) quando abilitato (slider 0–4000)
   manaUsed: 0,          // contatore sessione
-  // ── Adventurer's Guild quests (auto accept → farm g5w9 → finish → next) ──
+  // ── Adventurer's Guild quests (auto accept → farm g3w5 → finish → next) ──
   // ON = il bot accetta una quest disponibile (fuori cooldown), farma il suo mob
-  // su g5w9 fino al target del server, la consegna e prende la successiva.
+  // su g3w5 fino al target del server, la consegna e prende la successiva.
   questEnabled: true,
   questTaken: 0, questDone: 0,   // contatori accettate / consegnate
   questActive: null,             // {id,title,monster,minDmg,have,need} cache per UI + farm
@@ -1711,17 +1711,21 @@ async function processCubeAuto(src) {
 }
 
 // ── ADVENTURER'S GUILD QUESTS ──────────────────────────────────────────────────
-// All quests target g5w9 mobs (verified): "Kill 10 <monster> · min 5m dmg" or
-// "Gather Nx <item>". Endpoints (verified from the page's own JS):
+// Quest mobs live on g3w5 (Grakthar W2 — lizardman/goblin/troll). Kill quests: "Kill 10
+// <monster> · min 5m dmg". Gather quests: "Gather Nx <item>" → the item DROPS from the
+// mob into the inventory and must be DONATED (adventurers_donate_gather.php) to credit.
+// Endpoints (verified live from the page's own JS, all POST x-www-form-urlencoded):
 //   accept : POST /adventurers_accept_quest.php {quest_id} → {status:'ok'}
 //   finish : POST /adventurers_finish_quest.php {quest_id} → ok only if objective met
 //   giveup : POST /adventurers_giveup_quest.php {quest_id}
+//   donate : POST /adventurers_donate_gather.php {quest_id,item_id} (id = 2nd arg of the
+//            row's donateGatherItem(qid,item_id,this) button — the authoritative catalog id)
 // Rules: ONE active quest at a time; a finished quest goes on a 2-day rotation
 // cooldown (its row then loses the accept button → we just pick another available
 // one). Flow per cycle: finish if complete → accept next available → farm its mob
-// on g5w9 to ≥minDmg each (server counts the kill when the mob dies with our hit).
+// on g3w5 to ≥minDmg each (server counts the kill when the mob dies with our hit).
 const GUILD_URL  = `${BASE}/adventurers_guild.php`;
-const QUEST_WAVE = `${BASE}/active_wave.php?gate=5&wave=9`;
+const QUEST_WAVE = `${BASE}/active_wave.php?gate=3&wave=5`;   // Grakthar W2 — the wave that actually holds the Adventurer's Guild quest mobs (lizardman/goblin/troll). Was g5w9 (Olympus) which held NONE of them → gather items never dropped → gather quests froze at 0/N forever.
 const QUEST_DMG  = 5_000_000;            // default min damage per mob (quests ask ≥3–5m)
 const QUEST_INTERVAL = 20_000;           // how often we re-read the guild page
 let _lastQuest = 0;
@@ -1834,11 +1838,18 @@ function parseActiveQuest(doc) {
     const have = pm ? parseInt(pm[1].replace(/,/g, '')) : 0;
     const gather = questIsGather(row);
     const need = pm ? parseInt(pm[2].replace(/,/g, '')) : (gather ? (questGatherNeed(row) || 1) : 10);
+    // AUTHORITATIVE gather item id: the active row's "Donate instead" button is
+    // donateGatherItem(quest_id, item_id, this). The 2nd arg is the catalog item_id the
+    // donate endpoint wants — read it straight from here instead of guessing from the
+    // inventory (name-scan was fragile / could grab the wrong id → donation never credited).
+    const don = row.querySelector('[onclick*="donateGatherItem"]');
+    const donItem = don ? parseInt((don.getAttribute('onclick') || '').match(/donateGatherItem\(\s*\d+\s*,\s*(\d+)/)?.[1] || '0') : 0;
     return {
       id: _qid(fin || giv), have, need,
       finishable: !!fin || (need > 0 && have >= need),
       monster: questMonster(row), minDmg: gather ? 0 : questMinDmg(row), gather,
       item: gather ? questItem(row) : null,
+      donateItemId: donItem || null,
       title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
     };
   }
@@ -1888,7 +1899,7 @@ async function fetchGuild() {
 
 // A gather/kill quest whose creature is ALSO covered by the user's OWN farm config
 // (e.g. a low-level alt gathering "Orc Essence" from the very orcs it already farms on
-// g3w3) must NOT be redirected to the hardcoded g5w9 quest wave: that wave holds no such
+// g3w3) must NOT be redirected to the hardcoded g3w5 quest wave: that wave holds no such
 // mob for a low-level char, so the quest would never progress AND — worse — it would
 // reserve ALL the stamina and freeze the real farm ("preso una quest ma è ferma"). When
 // we detect the overlap we let Phase 2 farm the configured waves instead; the server
@@ -1911,7 +1922,7 @@ function questCoveredByConfig(q) {
     for (const t of (wave.targets || [])) {
       if (!matches(t)) continue;
       // TIMED target: Phase 1 already kills these on respawn — ALWAYS defer to it, never
-      // try g5w9 and never give up waiting. Return 'timed' so the caller can tell the
+      // try g3w5 and never give up waiting. Return 'timed' so the caller can tell the
       // difference (no have>0 guard needed: we just wait for the next respawn kill).
       if (t.timer) return 'timed';
       // Gather quests need no minimum damage — items drop on any kill, so any configured
@@ -1921,8 +1932,8 @@ function questCoveredByConfig(q) {
   return false;
 }
 
-// a transient farm wave for the active quest's monster on g5w9. Unknown monster →
-// empty include = match ALL g5w9 mobs (so gather quests still progress). Core token
+// a transient farm wave for the active quest's monster on g3w5. Unknown monster →
+// empty include = match ALL g3w5 mobs (so gather quests still progress). Core token
 // only (split on comma) so "Charybdis, Living Maelstrom" matches via "charybdis".
 function questWaveFor(q) {
   // Gather quests: no minDmg; use a modest target so a low-level account can kill the mob.
@@ -1951,25 +1962,29 @@ function questWaveFor(q) {
 // Returns the number donated this pass. The guild re-read reconciles the authoritative progress.
 let _lastDonate = 0;
 async function donateGatherItems(q) {
-  if (!q || !q.gather || !q.item || !q.id) return 0;
+  if (!q || !q.gather || !q.id || (!q.donateItemId && !q.item)) return 0;
   if (Date.now() - _lastDonate < 12_000) return 0;   // throttle: drops trickle in — no need to hammer
   _lastDonate = Date.now();
   const html = await getHtml(`${BASE}/inventory.php`);
   if (!html) return 0;
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  const want = q.item.toLowerCase().replace(/\s+/g, ' ').trim();
+  const wantId = q.donateItemId ? String(q.donateItemId) : null;   // authoritative id from the Donate button
+  const want = (q.item || '').toLowerCase().replace(/\s+/g, ' ').trim();
   let itemId = null, have = 0;
   for (const c of doc.querySelectorAll('[data-item-id]')) {
+    const cid = c.getAttribute('data-item-id');
     const raw = (c.querySelector('.item-name, [class*="name"], b, strong, h3, h4')?.textContent
               || c.getAttribute('title') || c.textContent || '').toLowerCase();
     const base = raw.replace(/\s*x\s*\d+\s*$/, '').replace(/\s+/g, ' ').trim();   // strip trailing "x12"
-    if (base === want || base.includes(want) || want.includes(base)) {
-      itemId = c.getAttribute('data-item-id');
+    const nameMatch = want && (base === want || base.includes(want) || want.includes(base));
+    // Prefer the exact item id (inventory data-item-id == catalog id); fall back to name.
+    if ((wantId && cid === wantId) || (!wantId && nameMatch)) {
+      itemId = cid;
       have = parseInt((raw.match(/x\s*(\d+)/) || [])[1] || '1');
       break;
     }
   }
-  if (!itemId || have <= 0) { dlog(`📦 quest: no "${q.item}" in inventory to deliver yet`, '#778'); return 0; }
+  if (!itemId || have <= 0) { dlog(`📦 quest: no "${q.item || ('#' + wantId)}" in inventory to deliver yet`, '#778'); return 0; }
   const remaining = Math.max(1, (q.need || 1) - (q.have || 0));
   const toDonate = Math.min(have, remaining);
   let done = 0;
@@ -2078,7 +2093,7 @@ async function processQuests() {
     const qcov = questCoveredByConfig(q);
     if (qcov === 'timed') {
       // Quest mob is a configured TIMED target — Phase 1 kills it on respawn.
-      // Never try g5w9, never give up: just wait for the next respawn cycle.
+      // Never try g3w5, never give up: just wait for the next respawn cycle.
       status = `📜 quest via timed: ${q.title} — waiting respawn`;
       return false;
     }
@@ -2086,7 +2101,7 @@ async function processQuests() {
       status = `📜 quest via farm: ${q.title}`;
       return false;   // let the general farm run; loot on the configured wave credits it
     }
-    // STALL GUARD A: zero engagement — mob not on g5w9 or below account's damage floor.
+    // STALL GUARD A: zero engagement — mob not on g3w5 or below account's damage floor.
     // After 3 fruitless passes (all zeroes) + 10 min → give up.
     const noProgress = (q.engaged || 0) === 0 && (q.have || 0) === 0;
     const sig = `${q.id}:${q.have || 0}:${q.engaged || 0}`;
@@ -2105,15 +2120,18 @@ async function processQuests() {
       return false;
     }
     // STALL GUARD B: engaged mobs but `have` never credited — wrong mob type or server mismatch.
-    // Skip for gather quests: items drop with RNG on loot; 0 have after N kills is normal.
-    // For kill quests: if have stays 0 for 15 min while engaging → give up + blacklist.
-    if (!q.gather && (q.engaged || 0) > 0 && (q.have || 0) === 0) {
-      if (Date.now() - (S._questSince || 0) > 15 * 60_000) {
+    // KILL quests: 15 min. GATHER quests: longer (30 min) because drops are RNG so 0-have for a
+    // while is normal — but NOT forever: a gather stuck at 0 (wrong mob on the wave, or the item
+    // simply never rolling) must eventually give up so it never freezes the farm ("le quest di
+    // gathering non vengono mai completate" + il farm resta bloccato dietro di esse).
+    const stallLimit = q.gather ? 30 * 60_000 : 15 * 60_000;
+    if ((q.engaged || 0) > 0 && (q.have || 0) === 0) {
+      if (Date.now() - (S._questSince || 0) > stallLimit) {
         const r = await post('adventurers_giveup_quest.php', { quest_id: q.id });
         S._questBlacklist = S._questBlacklist || {};
         S._questBlacklist[q.title] = Date.now();
         S.questActive = null; save();
-        log(`🏳️ quest given up (${r?.status || 'no resp'}) — engaging mobs but 0 credits in 15m (item quest?): ${q.title} (blacklisted 24h)`, '#fa0');
+        log(`🏳️ quest given up (${r?.status || 'no resp'}) — engaging mobs but 0 credits in ${Math.round(stallLimit/60000)}m: ${q.title} (blacklisted 24h)`, '#fa0');
         return false;
       }
     }
@@ -3117,7 +3135,7 @@ function renderStatus() {
     if (q) {
       const short = (q.title || '').length > 26 ? q.title.slice(0,26)+'…' : (q.title || 'quest');
       h += `<div style="font-size:12px;margin-bottom:4px;color:#cfa">
-        ${esc(short)}<br>&nbsp;&nbsp;→ <span style="color:#7df">${esc(q.monster || 'g5w9 mobs')}</span>
+        ${esc(short)}<br>&nbsp;&nbsp;→ <span style="color:#7df">${esc(q.monster || 'g3w5 mobs')}</span>
         <span style="color:#9c6"> ${q.have ?? 0}/${q.need ?? 10}</span>
         <span style="color:#778;font-size:10px"> · engaged ${q.engaged ?? 0}</span></div>`;
     } else {
@@ -3531,7 +3549,7 @@ function renderSettings() {
         'FSP stash is never touched — the bot waits for natural stamina once LSP is out');
   h += toggleRow('questenable', S.questEnabled,
         '📜 Auto Adventurer&apos;s Guild quests',
-        'Accept a quest → farm its mob on g5w9 (≥5m each) → turn in → next',
+        'Accept a quest → farm its mob on g3w5 (≥5m each) → turn in → next',
         'Quests off — never touch the Adventurer&apos;s Guild');
   h += toggleRow('debuglog', S.debug,
         '🐞 Debug log',
@@ -3806,8 +3824,8 @@ function wireSettings() {
     if (a === 'debuglog')   { S.debug       = el.checked; save(); renderSettings(); return; }
     if (a === 'manaenable') { S.manaEnabled = el.checked; save(); renderSettings(); return; }
     // ⚔ PvP: classe scelta a mano + allow-list skill
-    if (a === 'pvpclass')   { S.pvp.myClass = el.value; save(); renderUI(); log(`⚔ PvP: my class = ${el.value || 'auto'}`, '#ff5c8a'); return; }
-    if (a === 'pvprestrict'){ S.pvp.restrictSkills = el.checked; save(); renderUI(); log(`⚔ PvP: skill allow-list ${el.checked ? 'ON' : 'OFF'}`, '#ff5c8a'); return; }
+    if (a === 'pvpclass')   { S.pvp.myClass = el.value; save(); el.blur(); renderUI(); log(`⚔ PvP: my class = ${el.value || 'auto'}`, '#ff5c8a'); return; }
+    if (a === 'pvprestrict'){ S.pvp.restrictSkills = el.checked; save(); el.blur(); renderUI(); log(`⚔ PvP: skill allow-list ${el.checked ? 'ON' : 'OFF'}`, '#ff5c8a'); return; }
     if (a === 'pvpskill')   {
       const nm = el.dataset.skill || '';
       const set = new Set((S.pvp.allowSkills || []).map(x => String(x).toLowerCase()));
@@ -3873,6 +3891,14 @@ function wireSettings() {
 function renderUI() {
   if (!uiContent || minimized) return;
   if (activeTab === 'settings') return;   // Settings owns its DOM (live inputs) — don't clobber
+  // MOBILE FIX: never rebuild innerHTML while the user is interacting with a control in the
+  // panel. On phones a <select> opens a native picker that keeps FOCUS on the element; the
+  // farm/PvP loops call renderUI()/pvpTabRefresh() every pass, and clobbering innerHTML mid-pick
+  // destroyed the open <select> → the choice was discarded and reverted to the saved value
+  // ("il dropdown classe PvP non salva, resta fisso su Archer"). Skip the rebuild until focus
+  // leaves. Desktop was too fast to notice.
+  const ae = document.activeElement;
+  if (ae && uiContent.contains(ae) && /^(SELECT|INPUT|TEXTAREA)$/.test(ae.tagName)) return;
   uiContent.innerHTML = activeTab === 'pvp' ? renderPvp()
                       : activeTab === 'log' ? renderLog()
                       : renderStatus();
