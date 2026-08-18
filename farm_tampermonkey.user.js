@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.79.0
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g3w5→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob
+// @version      1.84.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g3w5→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob · v1.80: 📜 quests are NEVER given up (2-day cooldown = precious skill points) — a stalled quest is kept and the farm falls back to the general waves meanwhile; blacklist removed (always re-take offered quests). Complete a quest by configuring its mob's wave (e.g. g3w5 lizards) in the account config so wave loots credit it · v1.84: 📜 GATHER quests now KILL the source mob (target 5b, fightTarget stops at 'dead') instead of tagging it at 100k — a tagged mob auto-dies on its ~48h timer and drops nothing, leaving the account idle on full stamina; killing produces a fresh corpse to loot → real drop rolls (mirrors multibot 2026-08-17 fix)
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -17,7 +17,11 @@
 const BASE       = 'https://demonicscans.org';
 const SKILL_ID   = -1;    // power (default 10-stam hit)
 const SKILL_COST = 10;
-const ATK_GAP    = 1600;  // ms between attacks
+const ATK_GAP    = 1600;  // ms between attacks — the STARTING/safe gap; the real cadence is
+                          // adaptive (see _atkGap + attack()): it probes faster on clean hits
+                          // and backs off on "Slow down", settling just above the server limit.
+const ATK_GAP_MIN = 950;  // never probe below this (server damage.php limit is ~1s)
+const ATK_GAP_MAX = 2200; // never back off slower than this
 // 🏰 DUNGEON BOSS watch: while a "dungeon boss" target is armed, the main loop + the
 // location page-read run at THIS cadence (instead of 12s cache / 60s idle nap) so the
 // bot notices the boss room opening within ~3s and fires the instant it goes alive —
@@ -33,10 +37,18 @@ const STAM_POTS = [
 // Used ONLY as a fallback when the user ticks "use FSP if LSP is out" (S.fspFallback) AND
 // every LSP is gone. pickPotion() falls through to it; otherwise FSP is never touched.
 const FSP_POT = { item: 35, name: 'FSP' };
-// Small Stamina Potion (item 30, +500) — bought from the merchant (merch_id 1, 50g each).
-// The lifeline for LOW-LEVEL accounts that can't farm timed-boss FSP/LSP drops: opt-in via
-// S.buyStamPotions. Never touched unless that toggle is on, so high-level accounts ignore it.
-const SSP_POT = { item: 30, name: 'SSP', merchId: 1, refill: 500 };
+// Small Stamina Potion (item 30, +20 stamina) — bought from the merchant (merch_id 1, 50g).
+// A lifeline for LOW-LEVEL accounts only: +20 is meaningful for a tiny pool but useless for a
+// big one. Above LV1000 it's not even worth drinking (one hit empties it → thrash), so
+// pickPotion skips it there. Restocking is opt-in via S.buyStamPotions.
+const SSP_POT = { item: 30, name: 'SSP', merchId: 1, refill: 20 };
+// above this level, Small Stamina Potions (+20) are useless → never drunk (user: "leva le SSP sopra 1000")
+const SSP_MAX_LEVEL = 1000;
+// Small Mana Potion (item 162, +20 MP) — bought from the Apothecary of Epidaurus on Olympus
+// (olympus_damon_buy.php offer=small_mana, 60k gold, UNLIMITED). Nothing in the farm engine
+// CONSUMES mana (it plays Berserker = stamina), so this is a keep-the-bag-topped-up restock
+// for mana-class alts: opt-in via S.buyManaPotions, buys a stack of 100 when stock runs low.
+const MANA_POT = { item: 162, name: 'Small Mana Potion', offer: 'small_mana', keepStocked: 100, lowAt: 20 };
 
 // Attack tiers (skill_id → stamina). Damage is LINEAR in stamina (verified from
 // the battle-page formula: dmg = K * stamina_cost, K constant per fight). So we
@@ -163,6 +175,11 @@ const defState = () => ({
   // merchant (merch_id 1, 50g) and keep farming. OFF by default (high-level accounts don't
   // need it). Turn ON for a low-level alt in ⚙ Setup. Spends gold.
   buyStamPotions: false,
+  // Keep Small Mana Potions (item 162) stocked from the Apothecary of Epidaurus on Olympus
+  // (unlimited). OFF by default — only mana-class alts need it. When on, tops the bag up to a
+  // stack of 100 when it drops low. Note: the farm engine never DRINKS mana (Berserker); this
+  // just supplies the account (manual/PvP use). See maybeRestockMana().
+  buyManaPotions: false,
   // Autolevel (low-level alt): spend free stat points into stamina every cycle. Combined
   // with buyStamPotions + FSP fallback it keeps a low account farming & leveling non-stop.
   autolevel: false,
@@ -483,7 +500,7 @@ async function refreshInv() {
   S.potInv = S.potInv || {};
   // Always read FSP stock too (item 35) so the fallback knows how many are left — it's still
   // only ever SPENT when S.fspFallback is on and LSP is out (see pickPotion).
-  for (const p of [...STAM_POTS, FSP_POT, SSP_POT]) {
+  for (const p of [...STAM_POTS, FSP_POT, SSP_POT, MANA_POT]) {
     const card = doc.querySelector(`[data-item-id="${p.item}"]`);
     if (card) {
       const inv = card.getAttribute('data-inv-id');
@@ -512,11 +529,14 @@ function pickPotion() {
     const e = S.potInv?.[FSP_POT.item];
     if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...FSP_POT, inv: e.inv };
   }
-  // Small Stamina Potions (item 30): USE them whenever they're in the bag — they're cheap
-  // and buyable, and they're the low-level account's main stamina source. Usage is NOT gated
-  // by S.buyStamPotions (that toggle only controls RESTOCKING from the merchant); if the
-  // account already owns SSP, drink them regardless.
-  {
+  // Small Stamina Potions (item 30) are a LOW-LEVEL lifeline: +20 stamina is a real top-up
+  // for a tiny pool but useless for a big one. Above LV1000 a single hit empties the +20
+  // instantly → the bot drinks another SSP, one attack per potion, churning a whole stash
+  // (Ezra LV4359: 10k SSP, 3500+ use_item.php calls). So only sip SSP at/below LV1000;
+  // higher accounts fall through to FSP (if opted in) or wait for LSP/regen. Usage is NOT
+  // gated by S.buyStamPotions (that toggle only controls RESTOCKING); a low account drinks
+  // owned SSP regardless.
+  if ((S.userLevel || 0) <= SSP_MAX_LEVEL) {
     const e = S.potInv?.[SSP_POT.item];
     if (e && e.inv && (e.qty == null || e.qty > 0)) return { ...SSP_POT, inv: e.inv };
   }
@@ -538,7 +558,7 @@ async function useLSP(timer = false) {
   // Low-level lifeline: out of stamina potions but allowed to buy → restock Small Stamina
   // Potions from the merchant (best-effort, throttled), then retry. If the buy fails (no gold
   // / weekly cap), we just fall through and wait for natural regen.
-  if (!pick && S.buyStamPotions && Date.now() - (S._stamRestockAt || 0) > 120_000) {
+  if (!pick && S.buyStamPotions && (S.userLevel || 0) <= SSP_MAX_LEVEL && Date.now() - (S._stamRestockAt || 0) > 120_000) {
     S._stamRestockAt = Date.now();
     log('🛒 out of stamina potions — buying Small Stamina Potions from merchant…', '#9cf');
     const br = await post('merchant_buy.php', { merch_id: SSP_POT.merchId, qty: 20 });
@@ -622,22 +642,24 @@ async function healUp(dead = false) {
     if (/no.*potion|0 potion|do(n'?|\s+no)t have|out of|(ID 108)/i.test(msg)) hpEmpty = true;
     else log(`HP potion heal failed: ${msg || 'no resp'}`, '#f66');
   }
-  // 1b) RESTOCK from the merchant (opt-in — spends gold). merch_id 22 = Full HP Potion (5000g
-  // each). Throttled to ~1h (the merchant restocks weekly; this just avoids hammering). Best-
-  // effort buy, then RE-TRY the potion — the potion result decides whether the buy worked.
-  if (hpEmpty && S.buyHpPotions && Date.now() - (S._restockAt || 0) > 3600_000) {
+  // 1b) RESTOCK from the Apothecary of Epidaurus on Olympus (opt-in — spends gold).
+  // olympus_damon_buy.php offer=hp_potion → item 108 (the very potion user_heal_potion.php
+  // drinks), 30k gold each, UNLIMITED stock (weekly_limit 0). Buy a stack of 100 so one trip
+  // lasts a long time, then RE-TRY the potion — the potion result decides whether it worked.
+  // Short throttle (5 min) only to avoid hammering when the account is out of gold.
+  if (hpEmpty && S.buyHpPotions && Date.now() - (S._restockAt || 0) > 300_000) {
     S._restockAt = Date.now();
-    const hb = await post('merchant_buy.php', { merch_id: 22, qty: 25 });
-    if (hb?.message || hb?.status) log(`🛒 merchant says: ${hb.status || ''} ${hb.message || ''}`.trim(), '#9cf');
+    const hb = await post('olympus_damon_buy.php', { offer: 'hp_potion', qty: 100 });
+    if (hb?.message || hb?.status) log(`🛒 Apothecary says: ${hb.status || ''} ${hb.message || ''}`.trim(), '#9cf');
     const d = await post('user_heal_potion.php', { user_id: uid() });
     if (d && (d.status === 'success' || /full hp/i.test(d.message || ''))) {
       hpEmpty = false;
       userHp = parseInt(d.user_hp) || userHp; if (userHp) userHpMax = Math.max(userHpMax || 0, userHp);
       S.hpHeals++; save();
-      log(`🛒❤️ bought + used HP potion from merchant — HP ${userHp}/${userHpMax}`, '#3f8');
+      log(`🛒❤️ bought 100 HP potions from the Apothecary of Epidaurus (Olympus) — HP ${userHp}/${userHpMax}`, '#3f8');
       return true;
     }
-    log(`🛒 HP restock gave no usable potion (no gold / weekly limit)`, '#fa0');
+    log(`🛒 HP restock gave no usable potion (no gold?)`, '#fa0');
   }
   // 2) FREE RESURRECT (user_heal.php) — "You rise again at full strength", but ~1h cooldown.
   // Use when actually DEAD, or when CRITICAL (≤5% HP with no potions — the account is one
@@ -654,7 +676,7 @@ async function healUp(dead = false) {
       return true;
     }
     S._freeHealAt = Date.now() - 3600_000 + 5 * 60_000;   // cooldown → back off ~5 min, don't hammer
-    log(`💔 no HP potion & free heal on cooldown: ${d?.message || 'no resp'} — buy HP potions at the merchant`, '#f66');
+    log(`💔 no HP potion & free heal on cooldown: ${d?.message || 'no resp'} — enable HP auto-buy (Apothecary of Epidaurus, Olympus)`, '#f66');
   }
   return false;
 }
@@ -1038,8 +1060,60 @@ async function refreshTimers() {
     const mobs = Object.values(_collectMobs(doc));
     for (const t of timed) {
       const a = mobs.find(m => !m.dead && t.match(m));   // alive matching boss
-      if (a) { const die = await fetchAutoDie(a.id); if (die) liveBoss[t.key] = die; }
+      if (a) {
+        const die = await fetchAutoDie(a.id); if (die) liveBoss[t.key] = die;
+        // remember the battle id of a multi-phase boss while it IS attackable (phase 1/3),
+        // so refreshDuel() can probe battle.php once its card vanishes during the Duel Phase.
+        if (t.duel) { S.duelId = S.duelId || {}; S.duelId[t.key] = a.id; }
+      }
       else delete liveBoss[t.key];                        // dead → respawn branch (S.timers)
+    }
+  }
+}
+
+// ── DUEL PHASE DETECTOR (multi-phase Olympus bosses: Artemis / Hermes) ─────────
+// These bosses interpose a solo PvP "Duel Phase" between PvE phase 1 and phase 3.
+// During it the wave page shows NO attackable monster-card (only the auto-summon
+// spawner) → the farm has nothing to hit and would silently idle. We can't win the
+// duel headless, so we RAISE A SIGNAL (S.duel → dashboard banner) telling the user
+// to do the PvP by hand; once they win it, the PvE phase-3 card reappears and the
+// farm resumes on its own. The boss's battle.php id is the one refreshTimers()
+// remembered (S.duelId) from the last attackable phase.
+const DUEL_CHECK_INTERVAL = 60_000;
+let _lastDuelCheck = 0;
+async function refreshDuel() {
+  const now = Date.now();
+  if (now - _lastDuelCheck < DUEL_CHECK_INTERVAL) return;
+  _lastDuelCheck = now;
+  S.duel = S.duel || {};
+  S.duelId = S.duelId || {};
+  for (const wave of WAVES) {
+    for (const t of wave.targets.filter(x => x.timer && x.duel)) {
+      const id = S.duelId[t.key];
+      // boss alive in the auto-summon list? (S.timers is keyed by the full LIVE name,
+      // e.g. "artemis, divine huntress…"; match by the target's token via t.match)
+      const summonAlive = Object.entries(S.timers || {}).some(([nm, v]) => v && v.alive && t.match({ name: nm }));
+      if (!summonAlive || !id) {
+        if (S.duel[t.key]) { delete S.duel[t.key]; save(); log(`✅ ${t.label}: duel signal cleared`, '#2f8'); }
+        continue;
+      }
+      let html; try { html = await getHtml(`${BASE}/battle.php?id=${id}`); } catch { continue; }
+      if (!html) continue;
+      const inDuel = /Enter Phase Duel/i.test(html) || /entered a solo PvP phase/i.test(html);
+      if (inDuel) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        let url = '';
+        for (const a of doc.querySelectorAll('a[href]')) {
+          const h = a.getAttribute('href') || '';
+          if (/pvp_style_battle\.php/i.test(h)) { url = /^https?:/i.test(h) ? h : `${BASE}/${h.replace(/^\//, '')}`; break; }
+        }
+        const first = !S.duel[t.key];
+        S.duel[t.key] = { boss: t.label, url: url || `${BASE}/battle.php?id=${id}`, ts: now };
+        save();
+        if (first) log(`⚔️ DUEL PHASE — ${t.label}: vinci il PvP a mano per sbloccare la fase 3 → ${S.duel[t.key].url}`, '#ff5');
+      } else if (S.duel[t.key]) {
+        delete S.duel[t.key]; save(); log(`✅ ${t.label}: duello superato — riparto sul PvE`, '#2f8');
+      }
     }
   }
 }
@@ -1049,6 +1123,11 @@ async function refreshTimers() {
 // dungeons. The attack tiers/skills and damage.php response are identical; only
 // the join/loot endpoints and the mob id differ (verified live).
 let _lat = 0;
+// ADAPTIVE attack cadence (AIMD). Starts at ATK_GAP and self-tunes per session: every clean
+// hit shaves a little off (probe faster), every "Slow down" multiplies it back up (congestion
+// backoff). It converges just above the server's real damage.php limit, so the bot runs as fast
+// as the server allows without me hardcoding a magic number — and re-adapts if the limit shifts.
+let _atkGap = ATK_GAP;
 
 const isDungeon = idp => idp && idp.dgmid != null;
 
@@ -1060,21 +1139,37 @@ async function join(idp) {
 }
 
 async function attack(idp, skillId = SKILL_ID, cost = SKILL_COST) {
-  const w = ATK_GAP - (Date.now() - _lat);
+  const w = _atkGap - (Date.now() - _lat);
   if (w > 0) await sleep(w);
   const d = await post('damage.php', { ...idp, skill_id: skillId, stamina_cost: cost });
   _lat = Date.now();
   if (!d) return null;
   const msg = d.message || '';
-  if (msg.includes('Slow down'))          { await sleep(1200); return null; }
+  if (msg.includes('Slow down')) {
+    // congestion → back off fast (multiplicative) and wait out the new gap, then retry
+    const prev = _atkGap;
+    _atkGap = Math.min(ATK_GAP_MAX, Math.round(_atkGap * 1.3) + 40);
+    if (S.debug && _atkGap !== prev) dlog(`⏱ rate-limited → attack gap ${prev}→${_atkGap}ms`, '#fa0');
+    await sleep(_atkGap);
+    // A "Slow down" is a TRANSIENT server throttle (we just backed off + slept), NOT a failed
+    // attack. Signal it distinctly so fightTarget doesn't count it toward the 5-null ABORT —
+    // under IP contention (multibox: 5 workers, 1 IP) throttles cluster and were aborting whole
+    // fights at 0 damage. Callers ride through 'throttled' and retry.
+    return 'throttled';
+  }
+  // clean hit (no rate-limit) → probe a little faster next time, down to the floor
+  if (_atkGap > ATK_GAP_MIN) _atkGap = Math.max(ATK_GAP_MIN, _atkGap - 20);
   if (/rejoin|removed due/i.test(msg))    { await join(idp);   return null; }
   // death: server refuses the hit while we're dead. Heal+rejoin ONLY if auto-heal is on
   // (S.hpHealPct>0); if it's OFF the user chose not to spend potions → stay dead (the
   // fight loop / processWave skip out and wait for natural HP regen).
   if (/you are dead|you have died|you'?re dead/i.test(msg)) {
     userHp = 0;
-    if (S.hpHealPct > 0 && await healUp(true)) await join(idp);   // true = actual death (1 potion, then rejoin)
-    return null;
+    if (S.hpHealPct > 0 && await healUp(true)) { await join(idp); return null; }  // revived (potion/free-heal) → retry the hit
+    // dead and NO heal available (out of HP potions, can't buy, free-resurrect on cooldown):
+    // don't spin-attack a mob we can't hit (5×abort→retry burns requests + adds to the shared-IP
+    // rate-limit that starves the other accounts). Signal the caller to bail and wait for HP.
+    return 'dead';
   }
   if (msg.includes('Not enough stamina')) return null;
   if (d.stamina !== undefined) stam = parseInt(d.stamina);
@@ -1115,7 +1210,7 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
   // userdmg and can be stale/misparsed — trusting it once produced garbage K like 504109/stam
   // (impossible for a low-level char) which then mis-sized every tier ("troppo/troppo poco
   // danno"). Cost: the first hit is a 1-stam probe (K unknown) and K lands on hit #2 — cheap.
-  let dmg = startDmg, K = 0, stall = 0, nullStall = 0, measured = false;
+  let dmg = startDmg, K = 0, stall = 0, nullStall = 0, throttleStall = 0, measured = false;
   void knownStart;
   status = `→ ${shortName(label)}`;
 
@@ -1176,6 +1271,19 @@ async function fightTarget(idp, label, startDmg, dmgTarget, lsp, interruptible, 
 
     const before = dmg;
     const res = await attack(idp, tier.id, tier.stam);
+    // TRANSIENT rate-limit ("Slow down"): attack() already backed off + slept. Do NOT count it as
+    // a failed attack — that was aborting whole fights at 0 damage whenever throttles clustered
+    // (multibox IP contention). Keep retrying patiently; only give up after a long stretch so a
+    // permanently-throttled IP still eventually frees the worker for another mob.
+    if (res === 'throttled') {
+      if (++throttleStall >= 60) { log(`⏳ ${label}: rate-limited too long (${fmtDmg(dmg)}/${fmtDmg(dmgTarget)}) → moving on`, '#fa0'); return { dmg, reason: 'err' }; }
+      continue;
+    }
+    // DEAD with no heal available (no HP potion, can't buy, free-resurrect on cooldown): bail
+    // instead of spin-attacking a mob we can't damage — the outer loop moves on and retries
+    // healing later. Stops the endless 5×-abort loop that also loaded the shared IP.
+    if (res === 'dead') { log(`💀 ${label}: dead & can't heal → skipping until HP recovers`, '#fa0'); return { dmg, reason: 'dead' }; }
+    throttleStall = 0;
     if (!res) {
       nullStall++;
       if (nullStall >= 5) { log(`⛔ ${label}: 5 failed attacks in a row — aborting`, '#f66'); return { dmg, reason: 'err' }; }
@@ -1773,10 +1881,15 @@ function questMonster(row) {
   let m = req.match(/Monster:\s*([^·\n]+?)\s*(?:·|$)/i);
   if (m) return m[1].trim().toLowerCase();
   const desc = row.querySelector('.quest-main-desc')?.textContent || '';
-  m = desc.match(/Kill\s+\d+\s+(.+?)\s+while dealing/i);
+  // objective verb varies (Kill/Slay/Defeat/Hunt/Destroy…); the monster name runs until a
+  // boundary word (while/before/that…) or punctuation — was "Kill … while dealing" only,
+  // which missed "Slay 5 Troll Ravagers before …" → quest couldn't locate the mob.
+  m = desc.match(/(?:Kill|Slay|Defeat|Hunt|Destroy|Slaughter|Eliminate|Vanquish|Cull|Purge)\s+[\d,]+\s+(.+?)(?:\s+(?:while|before|that|so|and|near|in|along|to|for|who)\b|[.,!]|$)/i);
   if (m) return m[1].trim().toLowerCase();
-  // gather quests: "from (a/an/the/defeated) X" at end of sentence — handle all articles
-  m = desc.match(/\bfrom (?:(?:a|an|the|defeated)\s+)*([A-Za-z][A-Za-z' ]+?)[\s.,!]*$/im);
+  // gather quests: "from (a/an/the/defeated) X" — capture the 1–2 Capitalised words of the
+  // creature name (NOT anchored to end-of-line, which greedily grabbed "Lizardmen so the
+  // Guild's artisans…"). "Collect 10 Lizardman Scales from defeated Lizardmen" → "lizardmen".
+  m = desc.match(/\bfrom\s+(?:(?:a|an|the|defeated)\s+)*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)/);
   if (m) return m[1].trim().toLowerCase();
   // fallback: infer from quest title keywords (for gather quests with unusual phrasing)
   const title = (row.querySelector('.quest-main-title')?.textContent || '').toLowerCase();
@@ -1908,11 +2021,15 @@ function questCoveredByConfig(q) {
   if (!q) return false;
   const monster = (q.monster || '').toLowerCase().trim();
   if (!monster) return false;
-  const monWords = monster.split(/\s+/).filter(w => w.length >= 3 && w !== 'the' && w !== 'and');
+  // singularise words (men→man, strip trailing 's') so plural/generic quest names ("Lizardmen",
+  // "Troll Ravagers") match the singular config mob names.
+  const _sing = w => w.replace(/men$/, 'man').replace(/s$/, '');
+  const monWords = monster.split(/\s+/).map(_sing).filter(w => w.length >= 3 && w !== 'the' && w !== 'and');
   if (!monWords.length) return false;
   const targetWords = t => []
     .concat(t.include || [], t.srcName ? [t.srcName] : [])
     .flatMap(s => String(s).toLowerCase().split(/\s+/))
+    .map(_sing)
     .filter(w => w.length >= 3);
   // Kill quests: ALL name words must match (strict — avoid cross-mob mismatches).
   // Gather quests: ANY word matches (lenient — "troll warriors" → any "troll" target qualifies).
@@ -1936,15 +2053,28 @@ function questCoveredByConfig(q) {
 // empty include = match ALL g3w5 mobs (so gather quests still progress). Core token
 // only (split on comma) so "Charybdis, Living Maelstrom" matches via "charybdis".
 function questWaveFor(q) {
-  // Gather quests: no minDmg; use a modest target so a low-level account can kill the mob.
-  // Kill quests: exact mode, must deal at least minDmg per mob.
-  const dmg = q.gather ? 100_000 : Math.round((q.minDmg || QUEST_DMG) * 1.02);
-  const inc = q.monster ? [q.monster.split(',')[0].trim()] : [];
+  // GATHER quests: the drop lands only when a SOURCE MOB DIES and we loot its corpse. Tagging it
+  // (100k) just leaves the account idle on full stamina while the mob auto-dies on its ~48h timer
+  // → ~0 drops/day (multibot bug, fixed 2026-08-17). So KILL the source: target above any gate-3
+  // trash HP and let fightTarget stop at 'dead' (or stall out at 'cap' if it's truly unkillable).
+  // KILL quests: exact mode, tag each mob at ≈minDmg (the game credits the auto-die kill).
+  const GATHER_KILL = 5_000_000_000;   // above any gate-3 trash HP; fightTarget stops at 'dead'
+  const dmg = q.gather ? GATHER_KILL : Math.round((q.minDmg || QUEST_DMG) * 1.02);
+  // SINGULARISED word-subset match: quest text is often plural/generic ("Troll Ravagers",
+  // "Lizardmen") while the wave mob is singular/specific ("Troll Ravager", "Lizardman
+  // Shadowclaw"). Normalise BOTH sides the same way (men→man, strip trailing 's') and require
+  // every quest word to be in the mob's name → no more plural misses. Empty → match all.
+  const _qw = String(q.monster || '').toLowerCase().split(',')[0].split(/\s+/)
+    .map(w => w.replace(/men$/, 'man').replace(/s$/, '')).filter(w => w.length >= 3 && w !== 'the' && w !== 'and');
+  const questMatch = (m) => {
+    const iw = String(m.name || '').toLowerCase().split(/\s+/).map(w => w.replace(/men$/, 'man').replace(/s$/, ''));
+    return _qw.length ? _qw.every(w => iw.includes(w)) : true;
+  };
   return {
     id: 'quest', label: `Quest: ${q.title}`, url: QUEST_WAVE,
     targets: [{
       key: 'quest', label: q.monster || 'quest mobs', srcName: 'quest',
-      match: makeMatch(inc, []), dmgTarget: dmg,
+      match: questMatch, dmgTarget: dmg,
       // Gather: item drops are RNG (not 1 per kill) → DON'T cap kills at `need`, keep farming
       // until enough items are collected+donated (the real stop is have>=need after delivery).
       // Kill quests: exact mode, no killLimit.
@@ -2029,16 +2159,14 @@ async function processQuests() {
       }
 
       // 2) no active quest → accept the next available (off cooldown), then farm it.
-      // Quests we GAVE UP on (zero progress — mob unreachable for this account's level)
-      // are blacklisted for 24h so a low alt doesn't re-take the same impossible quest
-      // and freeze again ("account 4 le prende e si blocca perché non può attaccare").
+      // We NEVER give up a quest (2-day cooldown, precious skill points), so there is no
+      // blacklist to skip: always take whatever the guild offers. Completion is handled by
+      // farming the quest's mob (configure its wave — e.g. g3w5 lizards — in the account cfg).
       if (!active) {
-        const bl = S._questBlacklist || {};
         // Class-only quests (e.g. "Skill Warm Up") require a class selected at LV200+.
         // Skip them until the account reaches at least level 200.
         const lvl = S.userLevel || 0;
         const avail = parseAvailableQuests(doc)
-          .filter(p => !(bl[p.title] && Date.now() - bl[p.title] < 24 * 3600_000))
           .filter(p => lvl >= 200 || !/skill warm.?up/i.test(p.title));
         if (avail.length) {
           const p = avail[0];
@@ -2102,38 +2230,26 @@ async function processQuests() {
       return false;   // let the general farm run; loot on the configured wave credits it
     }
     // STALL GUARD A: zero engagement — mob not on g3w5 or below account's damage floor.
-    // After 3 fruitless passes (all zeroes) + 10 min → give up.
+    // NEVER give up the quest (2-day cooldown, precious skill points): after 3 fruitless
+    // passes just keep it and farm the general waves meanwhile — a configured quest wave
+    // credits it via loot. (User: "non deve mai abbandonare una quest, mi fai perdere punti".)
     const noProgress = (q.engaged || 0) === 0 && (q.have || 0) === 0;
     const sig = `${q.id}:${q.have || 0}:${q.engaged || 0}`;
     if (S._questSig === sig) S._questStall = (S._questStall || 0) + 1;
     else { S._questSig = sig; S._questStall = 0; }
     if (noProgress && (S._questStall || 0) >= 3) {
-      if (Date.now() - (S._questSince || 0) > 10 * 60_000) {
-        const r = await post('adventurers_giveup_quest.php', { quest_id: q.id });
-        S._questBlacklist = S._questBlacklist || {};
-        S._questBlacklist[q.title] = Date.now();
-        S.questActive = null; save();
-        log(`🏳️ quest given up (${r?.status || 'no resp'}) — no progress in 10m, too hard for this account: ${q.title} (blacklisted 24h)`, '#fa0');
-        return false;
-      }
-      status = `📜 quest stalled: ${q.title} — farming waves instead`;
+      status = `📜 quest stalled: ${q.title} — keeping it, farming waves meanwhile`;
       return false;
     }
-    // STALL GUARD B: engaged mobs but `have` never credited — wrong mob type or server mismatch.
-    // KILL quests: 15 min. GATHER quests: longer (30 min) because drops are RNG so 0-have for a
-    // while is normal — but NOT forever: a gather stuck at 0 (wrong mob on the wave, or the item
-    // simply never rolling) must eventually give up so it never freezes the farm ("le quest di
-    // gathering non vengono mai completate" + il farm resta bloccato dietro di esse).
+    // STALL GUARD B: engaged mobs but `have` never credited — wrong mob type, server mismatch,
+    // or RNG gather drop. NEVER give up (2-day cooldown, precious points): after the patience
+    // window fall back to the general waves so the farm never freezes, but KEEP the quest so its
+    // points aren't lost. Gather drops are RNG → longer window than kill quests.
     const stallLimit = q.gather ? 30 * 60_000 : 15 * 60_000;
-    if ((q.engaged || 0) > 0 && (q.have || 0) === 0) {
-      if (Date.now() - (S._questSince || 0) > stallLimit) {
-        const r = await post('adventurers_giveup_quest.php', { quest_id: q.id });
-        S._questBlacklist = S._questBlacklist || {};
-        S._questBlacklist[q.title] = Date.now();
-        S.questActive = null; save();
-        log(`🏳️ quest given up (${r?.status || 'no resp'}) — engaging mobs but 0 credits in ${Math.round(stallLimit/60000)}m: ${q.title} (blacklisted 24h)`, '#fa0');
-        return false;
-      }
+    if ((q.engaged || 0) > 0 && (q.have || 0) === 0 &&
+        Date.now() - (S._questSince || 0) > stallLimit) {
+      status = `📜 quest waiting for credit: ${q.title} — farming waves meanwhile`;
+      return false;
     }
     // Fully engaged and nobody dead yet → DON'T idle on the quest wave: remember the
     // death cooldown (S._questNextDie, from the cards' data-expire), farm elsewhere,
@@ -2928,6 +3044,28 @@ async function allocateStats() {
   } catch (e) { dlog(`stat alloc error: ${e.message}`, '#f66'); }
 }
 
+// ── MANA RESTOCK: keep Small Mana Potions stocked from the Olympus Apothecary ──────
+// Opt-in (S.buyManaPotions). The farm engine never drinks mana (Berserker = stamina), so
+// there's no "ran out mid-fight" trigger — instead we top the bag up periodically: when the
+// Small Mana Potion (item 162) stock drops below MANA_POT.lowAt, buy a stack of 100 from the
+// Apothecary of Epidaurus (olympus_damon_buy.php, unlimited). Throttled to ~30 min.
+let _manaRestockAt = 0;
+async function maybeRestockMana() {
+  if (!S.buyManaPotions) return;
+  if (Date.now() - _manaRestockAt < 1800_000) return;
+  _manaRestockAt = Date.now();
+  try {
+    let have = S.potInv?.[MANA_POT.item]?.qty;
+    if (have == null) { await refreshInv(); have = S.potInv?.[MANA_POT.item]?.qty; }
+    if (typeof have === 'number' && have > MANA_POT.lowAt) return;   // still well stocked
+    const r = await post('olympus_damon_buy.php', { offer: MANA_POT.offer, qty: MANA_POT.keepStocked });
+    if (r?.message || r?.status) log(`🛒 Apothecary says: ${r.status || ''} ${r.message || ''}`.trim(), '#9cf');
+    await refreshInv();
+    const now = S.potInv?.[MANA_POT.item]?.qty;
+    log(`🛒🔮 bought ${MANA_POT.keepStocked} Small Mana Potions from the Apothecary of Epidaurus (Olympus) — stock x${now ?? '?'}`, '#3f8');
+  } catch (e) { dlog(`mana restock error: ${e.message}`, '#f66'); }
+}
+
 async function mainLoop() {
   readStamFromDOM();
   let invLoaded = false;
@@ -2945,7 +3083,9 @@ async function mainLoop() {
     let questPending = false;
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
+      await refreshDuel();     // multi-phase boss Duel Phase → dashboard signal (throttled 60s)
       if (S.autolevel) await allocateStats();   // spend free stat points → stamina (throttled)
+      await maybeRestockMana();                 // keep Small Mana Potions stocked (opt-in, throttled)
       // Phase 0 — guild dungeon bosses (battle.php?dgmid) — single boss per source
       for (const src of (S.config || [])) {
         if (paused || !running) break;
