@@ -2,8 +2,8 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.84.0
-// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g3w5→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob · v1.80: 📜 quests are NEVER given up (2-day cooldown = precious skill points) — a stalled quest is kept and the farm falls back to the general waves meanwhile; blacklist removed (always re-take offered quests). Complete a quest by configuring its mob's wave (e.g. g3w5 lizards) in the account config so wave loots credit it · v1.84: 📜 GATHER quests now KILL the source mob (target 5b, fightTarget stops at 'dead') instead of tagging it at 100k — a tagged mob auto-dies on its ~48h timer and drops nothing, leaving the account idle on full stamina; killing produces a fresh corpse to loot → real drop rolls (mirrors multibot 2026-08-17 fix)
+// @version      1.86.0
+// @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g3w5→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob · v1.80: 📜 quests are NEVER given up (2-day cooldown = precious skill points) — a stalled quest is kept and the farm falls back to the general waves meanwhile; blacklist removed (always re-take offered quests). Complete a quest by configuring its mob's wave (e.g. g3w5 lizards) in the account config so wave loots credit it · v1.84: 📜 GATHER quests now KILL the source mob (target 5b, fightTarget stops at 'dead') instead of tagging it at 100k — a tagged mob auto-dies on its ~48h timer and drops nothing, leaving the account idle on full stamina; killing produces a fresh corpse to loot → real drop rolls (mirrors multibot 2026-08-17 fix) · v1.85: 🤺 FULL-AUTO DUEL PHASE — the multi-phase Olympus gods (Ares/Artemis/Hermes/Poseidon…) are now played end-to-end: phase 1 PvE → the solo-PvP Duel Phase is PLAYED HEADLESS by the bot (greedy max-damage, token-aware, blacklists uncastable nukes, heal/revive) → phase 3 PvE. Auto-detected on Scan (matches the god name across all 3 phase titles), with separate P1/P3 damage targets in Setup; winning depends on the account's gear, retries in 10m on a loss (ported from the Multibox engine). UI REDESIGN: card-based Status (Boss/Quest/Farm sections + live state badge + per-boss duel phase chip), an onboarding empty-state that walks a first-timer through Scan→tick→Save, and a new 📖 Guide tab explaining every feature in plain language · v1.86: 🐛 FSP-before-LSP fix (refreshInv read an unreadable LSP count as "0 left" → the bot jumped to the FSP fallback while LSP were still in the bag; now an unreadable count = UNKNOWN, so LSP stay preferred and FSP is only spent once LSP are truly out — mirrored in the multibox engine) + 📜 SKILL WARM-UP quests ("use N skills against monsters") now played automatically (ported from the multibox: reads the account's own skills off a mob's battle page, casts the cheapest MANA class skill, drinks Large→Small mana potions to keep casting; needs a class selected at LV200+)
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -49,6 +49,11 @@ const SSP_MAX_LEVEL = 1000;
 // CONSUMES mana (it plays Berserker = stamina), so this is a keep-the-bag-topped-up restock
 // for mana-class alts: opt-in via S.buyManaPotions, buys a stack of 100 when stock runs low.
 const MANA_POT = { item: 162, name: 'Small Mana Potion', offer: 'small_mana', keepStocked: 100, lowAt: 20 };
+// Large Mana Potion (item 163, +200 MP) — preferred over the Small one when DRINKING mana to
+// keep casting during a "Skill Warm Up" quest (use N class skills). Read into potInv so
+// skillWarmup()/drinkMana() know the stock + inv_id. Drinking order: Large (163) then Small (162).
+const MANA_POT_L = { item: 163, name: 'Large Mana Potion' };
+const MANA_ITEMS = [163, 162];
 
 // Attack tiers (skill_id → stamina). Damage is LINEAR in stamina (verified from
 // the battle-page formula: dmg = K * stamina_cost, K constant per fight). So we
@@ -500,12 +505,20 @@ async function refreshInv() {
   S.potInv = S.potInv || {};
   // Always read FSP stock too (item 35) so the fallback knows how many are left — it's still
   // only ever SPENT when S.fspFallback is on and LSP is out (see pickPotion).
-  for (const p of [...STAM_POTS, FSP_POT, SSP_POT, MANA_POT]) {
+  for (const p of [...STAM_POTS, FSP_POT, SSP_POT, MANA_POT, MANA_POT_L]) {
     const card = doc.querySelector(`[data-item-id="${p.item}"]`);
     if (card) {
       const inv = card.getAttribute('data-inv-id');
-      const qty = parseInt(card.querySelector('.potion-qty-left')?.textContent.replace(/[^\d]/g, '') || '0');
-      S.potInv[p.item] = { inv, qty: Number.isFinite(qty) ? qty : null };
+      // Quantity: read the count element if present. CRITICAL — when the count can't be read
+      // (element missing / empty text) the qty is UNKNOWN, not zero. The old `|| '0'` turned an
+      // unreadable LSP count into "0 left", so pickPotion skipped LSP and jumped straight to the
+      // FSP fallback while LSP were still in the bag (user bug 2026-08-27). null = unknown →
+      // pickPotion treats LSP as available (and self-corrects if a use actually fails), so the
+      // precious FSP stash is only touched once LSP are TRULY out.
+      const qtyEl  = card.querySelector('.potion-qty-left');
+      const qtyRaw = qtyEl ? (qtyEl.textContent || '').replace(/[^\d]/g, '') : '';
+      const qtyN   = qtyRaw === '' ? NaN : parseInt(qtyRaw, 10);
+      S.potInv[p.item] = { inv, qty: Number.isFinite(qtyN) ? qtyN : null };
     } else {
       delete S.potInv[p.item];
     }
@@ -1001,8 +1014,14 @@ async function anyTimedReady() {
     parseAutoSummon(html);
     const mobs = Object.values(parseMobs(html));
     for (const t of timed) {
-      if (mobs.some(m => !m.dead && t.match(m) && m.userdmg < t.dmgTarget)) {
-        const hit = mobs.find(m => !m.dead && t.match(m) && m.userdmg < t.dmgTarget);
+      // A duel boss in its Duelist/Ascended phase is NOT PvE-attackable: its leaderboard
+      // userdmg is frozen from phase 1, so userdmg < dmgTarget stays true forever and would
+      // pre-empt farm on this wave indefinitely. Only count a duel target as ready in its
+      // fresh phase-1 (plain god name — no "duelist"/"ascended"). processDuelBoss owns the rest.
+      const ready = m => !m.dead && t.match(m) && m.userdmg < t.dmgTarget
+                      && !(t.duel && /duelist|ascended/i.test(m.name));
+      if (mobs.some(ready)) {
+        const hit = mobs.find(ready);
         log(`⏰ ${hit.name} ready in ${wave.id} → back to bosses`, '#f90');
         delete _waveCache[wave.url];        // force fresh fetch in phase 1
         return true;
@@ -1062,60 +1081,156 @@ async function refreshTimers() {
       const a = mobs.find(m => !m.dead && t.match(m));   // alive matching boss
       if (a) {
         const die = await fetchAutoDie(a.id); if (die) liveBoss[t.key] = die;
-        // remember the battle id of a multi-phase boss while it IS attackable (phase 1/3),
-        // so refreshDuel() can probe battle.php once its card vanishes during the Duel Phase.
-        if (t.duel) { S.duelId = S.duelId || {}; S.duelId[t.key] = a.id; }
       }
       else delete liveBoss[t.key];                        // dead → respawn branch (S.timers)
     }
   }
 }
 
-// ── DUEL PHASE DETECTOR (multi-phase Olympus bosses: Artemis / Hermes) ─────────
-// These bosses interpose a solo PvP "Duel Phase" between PvE phase 1 and phase 3.
-// During it the wave page shows NO attackable monster-card (only the auto-summon
-// spawner) → the farm has nothing to hit and would silently idle. We can't win the
-// duel headless, so we RAISE A SIGNAL (S.duel → dashboard banner) telling the user
-// to do the PvP by hand; once they win it, the PvE phase-3 card reappears and the
-// farm resumes on its own. The boss's battle.php id is the one refreshTimers()
-// remembered (S.duelId) from the last attackable phase.
-const DUEL_CHECK_INTERVAL = 60_000;
-let _lastDuelCheck = 0;
-async function refreshDuel() {
-  const now = Date.now();
-  if (now - _lastDuelCheck < DUEL_CHECK_INTERVAL) return;
-  _lastDuelCheck = now;
-  S.duel = S.duel || {};
-  S.duelId = S.duelId || {};
-  for (const wave of WAVES) {
-    for (const t of wave.targets.filter(x => x.timer && x.duel)) {
-      const id = S.duelId[t.key];
-      // boss alive in the auto-summon list? (S.timers is keyed by the full LIVE name,
-      // e.g. "artemis, divine huntress…"; match by the target's token via t.match)
-      const summonAlive = Object.entries(S.timers || {}).some(([nm, v]) => v && v.alive && t.match({ name: nm }));
-      if (!summonAlive || !id) {
-        if (S.duel[t.key]) { delete S.duel[t.key]; save(); log(`✅ ${t.label}: duel signal cleared`, '#2f8'); }
-        continue;
-      }
-      let html; try { html = await getHtml(`${BASE}/battle.php?id=${id}`); } catch { continue; }
-      if (!html) continue;
-      const inDuel = /Enter Phase Duel/i.test(html) || /entered a solo PvP phase/i.test(html);
-      if (inDuel) {
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        let url = '';
-        for (const a of doc.querySelectorAll('a[href]')) {
-          const h = a.getAttribute('href') || '';
-          if (/pvp_style_battle\.php/i.test(h)) { url = /^https?:/i.test(h) ? h : `${BASE}/${h.replace(/^\//, '')}`; break; }
-        }
-        const first = !S.duel[t.key];
-        S.duel[t.key] = { boss: t.label, url: url || `${BASE}/battle.php?id=${id}`, ts: now };
-        save();
-        if (first) log(`⚔️ DUEL PHASE — ${t.label}: vinci il PvP a mano per sbloccare la fase 3 → ${S.duel[t.key].url}`, '#ff5');
-      } else if (S.duel[t.key]) {
-        delete S.duel[t.key]; save(); log(`✅ ${t.label}: duello superato — riparto sul PvE`, '#2f8');
-      }
-    }
+// ── DUEL PHASE ENGINE (multi-phase Olympus bosses: Ares/Artemis/Hermes/Poseidon/…) ──
+// These gods insert a solo PvP "Duel Phase" between PvE phase 1 and phase 3. The bot
+// now PLAYS THE DUEL HEADLESS (ported from the Multibox engine, protocol captured live
+// 2026-08-22) instead of only signalling the user. Cycle, matched by the GOD NAME which
+// every phase carries (e.g. "ares"):
+//   phase 1  "Ares, Sovereign of the Red Bastion"  → PvE to t.dmgTarget      (leaderboard userdmg)
+//   duel     "Ares, Duelist of the Blood Oath"      → play the solo PvP duel  (pvp_style_battle)
+//   phase 3  "Ares, Ascended God of Unending War"   → PvE to t.phase3Dmg      (combined userdmg)
+// CAVEAT: winning depends on the account's gear (attacker atk vs boss def). On a loss the
+// bot sets a 10-minute retry cooldown so it doesn't burn turns on an unwinnable duel.
+
+// --- protocol helpers (pvp_style_battle) ---
+async function duelState(activeId, sinceLogId = 0) {
+  const txt = await getHtml(`${BASE}/pvp_style_state.php?source=monster_phase&since_log_id=${sinceLogId}&active_id=${activeId}`);
+  try { return JSON.parse(txt); } catch { return null; }
+}
+function duelAction(activeId, action, extra = {}) {
+  return post('pvp_style_action.php', { source: 'monster_phase', active_id: activeId, action, ...extra });
+}
+// phase descriptor for a boss instance id, parsed from its battle.php page:
+//   { duel(bool — "Enter Phase Duel" shown), phaseDmg(phase-3 accumulator | null) }
+async function readBossPhase(activeId) {
+  const html = await getHtml(`${BASE}/battle.php?id=${activeId}`);
+  const doc  = new DOMParser().parseFromString(html, 'text/html');
+  const duel = !!doc.querySelector('a[href*="pvp_style_battle.php"]')
+            || /Enter Phase Duel|entered a\s*(?:<strong>\s*)?solo PvP phase/i.test(html);
+  let phaseDmg = null;
+  for (const m of html.matchAll(/Phase DMG:\s*([\d,]+)/gi)) {
+    const v = parseInt(m[1].replace(/,/g, '')); if (!isNaN(v)) phaseDmg = Math.max(phaseDmg ?? 0, v);
   }
+  return { duel, phaseDmg };
+}
+
+// greedy skill pick: highest raw damage we can afford in tokens (cost is a good damage
+// proxy — Power Slash cost 9 hits ×12; Slash cost 0 is the free filler). Prefer pure-damage
+// skills (effect_id 0), else the priciest affordable attack, else the free Slash. `avoid` =
+// skill ids that failed this match (advanced nukes needing "full Arcane Charge", a resource
+// beyond tokens) — skip them so we don't waste turns on an uncastable skill.
+function pickDuelSkill(me, avoid) {
+  const bad = avoid || new Set();
+  const atk = (me.skills || []).filter(s => s.type === 'attack' && s.target !== 'self' && !bad.has(String(s.id)));
+  if (!atk.length) return null;
+  const tokens = me.tokens || 0;
+  const afford = atk.filter(s => (s.cost || 0) <= tokens);
+  const pool   = afford.length ? afford : atk.filter(s => (s.cost || 0) === 0);
+  if (!pool.length) return null;
+  const pure = pool.filter(s => (s.effect_id || 0) === 0);
+  return (pure.length ? pure : pool).slice().sort((a, b) => (b.cost || 0) - (a.cost || 0))[0];
+}
+
+// play a duel to completion. Returns true if won (winner_side === 'ally').
+async function runDuel(activeId, t) {
+  let sinceLog = 0, guard = 0, idle = 0;
+  const badSkills = new Set();   // skills that failed this match (need a charge/resource we lack)
+  while (running && !paused && guard++ < 400) {
+    const st = await duelState(activeId, sinceLog);
+    if (!st || !st.ok) { await sleep(2000); if (++idle > 5) return false; continue; }
+    idle = 0;
+    if (typeof st.last_log_id === 'number') sinceLog = st.last_log_id;
+    if (st.match && st.match.ended) return st.match.winner_side === 'ally';
+    const me = st.me || {};
+    if (!me.in_match) { await duelAction(activeId, 'join_room'); await sleep(800); continue; }
+    if (!me.alive) {
+      if (me.has_revive_skill) {   // try a revive skill; otherwise the match ends as a loss
+        const rev  = (me.skills || []).find(s => s.type === 'revive');
+        const meKey = st.teams?.ally?.players_by_num && Object.values(st.teams.ally.players_by_num)[0]?.key;
+        if (rev && meKey) { await duelAction(activeId, 'use_skill', { skill_id: rev.id, target_key: meKey }); await sleep(800); continue; }
+      }
+      await sleep(1500); continue;
+    }
+    const turn = st.turn || {};
+    if (turn.side !== 'ally') { await sleep(Math.min(1500, ((turn.seconds_left || 2) * 1000) / 2 + 400)); continue; }
+    // my turn — heal if low & able, else attack the living enemy for max damage
+    const enemy = Object.values(st.teams?.enemy?.players_by_num || {}).find(p => p.alive);
+    const meP   = Object.values(st.teams?.ally?.players_by_num || {})[0];
+    if (!enemy) { await sleep(1000); continue; }
+    if (me.has_heal_skill && meP && meP.hp_max && meP.hp / meP.hp_max <= 0.30) {
+      const heal = (me.skills || []).find(s => s.type === 'heal' || (s.target === 'self' && /heal/i.test(s.name)));
+      if (heal && (heal.cost || 0) <= (me.tokens || 0)) { await duelAction(activeId, 'use_skill', { skill_id: heal.id, target_key: meP.key }); await sleep(700); continue; }
+    }
+    const skill = pickDuelSkill(me, badSkills);
+    if (!skill) { await sleep(1200); continue; }
+    const r = await duelAction(activeId, 'use_skill', { skill_id: skill.id, target_key: enemy.key });
+    const rmsg = r ? (r.message || '') : '';
+    // skill couldn't be cast (advanced nuke needs "full Arcane Charge", cooldown, etc.) →
+    // blacklist it for this match and immediately retry with the next-best skill.
+    const failed = (r && r.ok === false) || /requires|charge|cooldown|not enough|cannot|need\s|locked|full arcane/i.test(rmsg);
+    if (failed && !/dealt|damage/i.test(rmsg)) {
+      if (String(skill.id) !== '0') { badSkills.add(String(skill.id)); continue; }  // never blacklist free Slash
+      await sleep(600); continue;
+    }
+    status = `🤺 duel ${shortName(t.label)} · ${fmtDmg(enemy.hp_max - enemy.hp)}/${fmtDmg(enemy.hp_max)}`;
+    if (guard % 4 === 0) renderUI();
+    await sleep(600);
+  }
+  const fin = await duelState(activeId, sinceLog);   // final read for the true result
+  return !!(fin && fin.match && fin.match.ended && fin.match.winner_side === 'ally');
+}
+
+// one tick for a multi-phase (duel) Olympus boss. The boss card is ALWAYS present on the
+// wave (id stable across the cycle) but RENAMES per phase — matched by the god name.
+async function processDuelBoss(wave, t) {
+  const store = (S.duel = S.duel || {});
+  const st = store[t.key] || (store[t.key] = { activeId: null, dueled: false, retryAt: 0 });
+  delete _waveCache[wave.url];                       // fresh read (phase transitions matter)
+  const mobs = await fetchWave(wave.url, false);
+  const boss = mobs.find(m => !m.dead && t.match(m));
+  if (!boss) return false;                            // boss down / respawning → wait
+  if (st.activeId !== boss.id) { st.activeId = boss.id; st.dueled = false; st.retryAt = 0; save(); }  // new cycle
+
+  // "duelist" = duel window; "ascended" = phase-3 title on gods that flip the card name
+  // (Ares/Poseidon). Both mean we're past phase 1. Some gods (Artemis) keep the "duelist"
+  // name through phase 3, so confirm against battle.php whether the duel is still enterable.
+  if (/duelist|ascended/i.test(boss.name)) {
+    const phase = await readBossPhase(boss.id);
+    if (phase.duel) {
+      if (Date.now() < (st.retryAt || 0)) { status = `🤺 ${shortName(t.label)} duel cooldown`; return false; }
+      status = `🤺 ${shortName(t.label)} — DUEL`; renderUI();
+      log(`🤺 ${t.label} — Duel Phase, playing the duel…`, '#ff5');
+      const won = await runDuel(boss.id, t);
+      if (won) { st.dueled = true; st.retryAt = 0; save(); log(`🏆 ${t.label} — duel WON, phase 3 unlocked`, '#2f8'); }
+      else     { st.retryAt = Date.now() + 10 * 60_000; save(); log(`🤺 ${t.label} — duel not won (tokens/gear?); retry in 10m`, '#fa0'); }
+      _didWork = true;
+      return true;
+    }
+    // duel link gone → duel resolved (won here or played by hand) → phase 3 is live
+    if (!st.dueled) { st.dueled = true; st.retryAt = 0; save(); log(`🏆 ${t.label} — duel resolved; phase 3 unlocked`, '#2f8'); }
+  }
+
+  // ATTACKABLE phase — before the duel = phase 1, after = phase 3
+  const target = st.dueled ? (t.phase3Dmg || t.dmgTarget) : t.dmgTarget;
+  const tag    = st.dueled ? ' (P3)' : '';
+  if (boss.userdmg >= target) {
+    status = `${st.dueled ? '✅' : '⚔️'} ${shortName(t.label)} ${st.dueled ? 'P3' : 'P1'} done · ${fmtDmg(boss.userdmg)}`;
+    return false;
+  }
+  status = `⚔️ ${shortName(t.label)} ${st.dueled ? 'P3' : 'P1'}`;
+  const { dmg } = await fightTarget({ monster_id: boss.id }, t.label + tag, boss.userdmg, target,
+                                    t.useLSP || 'asNeeded', false, null, true, null, true, false);
+  if (dmg >= target) {
+    log(`✓ ${t.label} ${st.dueled ? 'phase 3' : 'phase 1'} — ${fmtDmg(dmg)}`, '#2f8');
+    if (st.dueled) { S.timedKills++; S.timedBy[t.key] = (S.timedBy[t.key] || 0) + 1; save(); }
+  }
+  return true;
 }
 
 // ── COMBAT ────────────────────────────────────────────────────────────────────
@@ -1940,6 +2055,13 @@ function questGatherNeed(row) {
   const m = req.match(/Gather\s+(\d+)\s*x/i);
   return m ? parseInt(m[1]) : null;
 }
+// SKILL WARM UP quest ("Use N skills against monsters"): no target mob — the counter credits
+// class skills that cost MANA. Detected from the objective verb or the title.
+function questIsSkill(row) {
+  const desc  = row.querySelector('.quest-main-desc')?.textContent || '';
+  const title = row.querySelector('.quest-main-title')?.textContent || '';
+  return /use\s+\d+\s+skills?/i.test(desc) || /skill\s*warm.?up/i.test(title);
+}
 
 // the single active quest (row carrying give-up/finish controls), or null
 function parseActiveQuest(doc) {
@@ -1949,8 +2071,9 @@ function parseActiveQuest(doc) {
     if (!fin && !giv) continue;
     const pm   = (row.querySelector('.quest-progress')?.textContent || '').match(/([\d,]+)\s*\/\s*([\d,]+)/);
     const have = pm ? parseInt(pm[1].replace(/,/g, '')) : 0;
-    const gather = questIsGather(row);
-    const need = pm ? parseInt(pm[2].replace(/,/g, '')) : (gather ? (questGatherNeed(row) || 1) : 10);
+    const skill  = questIsSkill(row);
+    const gather = !skill && questIsGather(row);
+    const need = pm ? parseInt(pm[2].replace(/,/g, '')) : (skill ? 20 : gather ? (questGatherNeed(row) || 1) : 10);
     // AUTHORITATIVE gather item id: the active row's "Donate instead" button is
     // donateGatherItem(quest_id, item_id, this). The 2nd arg is the catalog item_id the
     // donate endpoint wants — read it straight from here instead of guessing from the
@@ -1960,7 +2083,7 @@ function parseActiveQuest(doc) {
     return {
       id: _qid(fin || giv), have, need,
       finishable: !!fin || (need > 0 && have >= need),
-      monster: questMonster(row), minDmg: gather ? 0 : questMinDmg(row), gather,
+      monster: skill ? '' : questMonster(row), minDmg: (skill || gather) ? 0 : questMinDmg(row), gather, skill,
       item: gather ? questItem(row) : null,
       donateItemId: donItem || null,
       title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
@@ -1981,10 +2104,11 @@ function parseAvailableQuests(doc) {
     if (cdEl && parseInt(cdEl.getAttribute('data-cooldown-ts') || '0') > now) continue;
     const lim = row.textContent.match(/(\d+)\s*\/\s*\d+\s*remaining/i);
     if (lim && parseInt(lim[1]) <= 0) continue;
-    const gather = questIsGather(row);
+    const skill  = questIsSkill(row);
+    const gather = !skill && questIsGather(row);
     out.push({
-      id: _qid(acc), monster: questMonster(row), minDmg: gather ? 0 : questMinDmg(row), gather,
-      item: gather ? questItem(row) : null, need: gather ? (questGatherNeed(row) || 1) : 10,
+      id: _qid(acc), monster: skill ? null : questMonster(row), minDmg: (skill || gather) ? 0 : questMinDmg(row), gather, skill,
+      item: gather ? questItem(row) : null, need: skill ? 20 : gather ? (questGatherNeed(row) || 1) : 10,
       title: (row.querySelector('.quest-main-title')?.textContent || '').trim(),
     });
   }
@@ -2130,6 +2254,74 @@ async function donateGatherItems(q) {
   return done;
 }
 
+// ── SKILL WARM UP quest (ported from the multibox engine) ──────────────────────
+// "Use N skills against monsters" — the counter only credits MANA class skills, so we read
+// the account's OWN skills off a mob's battle page (works for any class, automatic), pick the
+// CHEAPEST mana skill, cast it, and drink mana potions when MP runs out. Needs a class
+// selected at LV200+ (the accept filter already gates it).
+let _warmupSkill = null;
+async function battleSkills(monsterId) {
+  const html = await getHtml(`${BASE}/battle.php?id=${monsterId}`);
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const out = [];
+  for (const b of doc.querySelectorAll('.attack-btn, button[data-skill-id]')) {
+    const id = b.getAttribute('data-skill-id');
+    if (id == null) continue;
+    const cost = b.querySelector('.skill-cost')?.textContent || '';
+    const mp   = parseInt(b.getAttribute('data-mana-cost') || (cost.match(/(\d+)\s*MP/i) || [])[1] || '0');
+    const stam = parseInt((cost.match(/(\d+)\s*STAM/i) || [])[1] || b.getAttribute('data-stam-cost') || '1');
+    out.push({ skillId: parseInt(id), name: b.getAttribute('data-skill-name') || '', mp, stam });
+  }
+  return out;
+}
+// drink a mana potion (Large 163 first, then Small 162) so MP never blocks a skill cast.
+async function drinkMana() {
+  if (!S.potInv) await refreshInv();
+  for (const item of MANA_ITEMS) {
+    const e = S.potInv?.[item];
+    if (e && e.inv && (e.qty == null || e.qty > 0)) {
+      const r = await post('use_item.php', { inv_id: e.inv, qty: 1 });
+      const ok = r && (r.status === 'success' || r.success === true || /mana/i.test(r.message || ''));
+      if (ok) { if (typeof e.qty === 'number') e.qty = Math.max(0, e.qty - 1); log('🔵 drank mana potion for skill cast', '#6cf'); return true; }
+    }
+  }
+  // out of mana potions → restock Small Mana from the Olympus Apothecary if opted in
+  if (S.buyManaPotions && Date.now() - (S._manaRestockAt || 0) > 300_000) {
+    S._manaRestockAt = Date.now();
+    try { await post('olympus_damon_buy.php', { offer: 'small_mana', qty: 100 }); await refreshInv(); log('🔵 restocked Small Mana Potions', '#6cf'); } catch {}
+    return drinkMana();
+  }
+  return false;
+}
+async function skillWarmup(q) {
+  // find an alive farm mob to cast on (any configured non-timed wave)
+  let mob = null;
+  for (const wave of WAVES) {
+    if (!wave.targets.some(t => !t.timer)) continue;
+    const mobs = await fetchWave(wave.url, false);
+    mob = mobs.find(m => !m.dead);
+    if (mob) break;
+  }
+  if (!mob) { status = `📜 ${q.title} ${q.have || 0}/${q.need} — waiting for a monster to cast on`; return false; }
+  // learn the cheapest mana skill once (per account/class)
+  if (!_warmupSkill) {
+    const mana = (await battleSkills(mob.id)).filter(s => s.mp > 0).sort((a, b) => a.mp - b.mp || a.stam - b.stam);
+    if (!mana.length) { status = `📜 ${q.title}: no mana class skill found (class selected?)`; return false; }
+    _warmupSkill = mana[0];
+    log(`📜 skill warm-up: using "${_warmupSkill.name}" (${_warmupSkill.mp} MP / ${_warmupSkill.stam} stam)`, '#9cf');
+  }
+  const sk = _warmupSkill;
+  status = `📜 skill warm-up ${q.have || 0}/${q.need}`;
+  await join({ monster_id: mob.id });
+  let r = await post('damage.php', { monster_id: mob.id, skill_id: sk.skillId, stamina_cost: sk.stam });
+  // out of mana → drink a mana potion and retry the cast once
+  if (r && r.status !== 'success' && /mana/i.test(r.message || '')) {
+    if (await drinkMana()) r = await post('damage.php', { monster_id: mob.id, skill_id: sk.skillId, stamina_cost: sk.stam });
+  }
+  if (r && r.status === 'success') { _didWork = true; log(`📜 skill warm-up: cast ${sk.name} (${q.have || 0}/${q.need})`, '#9cf'); }
+  return true;
+}
+
 // Drive the Adventurer's Guild "di seguito": finish a completed quest → accept the
 // next available one (only ONE at a time) → farm its mob to the server target → on
 // the next read finish it and accept the next, and so on. Cooldown quests are just
@@ -2167,14 +2359,15 @@ async function processQuests() {
         // Skip them until the account reaches at least level 200.
         const lvl = S.userLevel || 0;
         const avail = parseAvailableQuests(doc)
-          .filter(p => lvl >= 200 || !/skill warm.?up/i.test(p.title));
+          .filter(p => !p.skill || lvl >= 200);   // skill warm-up needs a class selected (LV200+)
         if (avail.length) {
           const p = avail[0];
           const r = await post('adventurers_accept_quest.php', { quest_id: p.id });
           if (r && r.status === 'ok') {
             S.questTaken++;
-            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, gather: p.gather, item: p.item, have: 0, need: p.need || 10, engaged: 0 };
-            log(`📜 quest accepted: ${p.title}${p.monster ? ` → ${p.monster}` : ''} ${p.gather ? `(gather ${p.need||'?'}× ${p.item||'item'})` : `(min ${fmtDmg(p.minDmg)})`}`, '#9cf');
+            _warmupSkill = null;   // re-learn the mana skill for this (possibly new) quest/class
+            active = { id: p.id, title: p.title, monster: p.monster, minDmg: p.minDmg, gather: p.gather, skill: p.skill, item: p.item, have: 0, need: p.need || (p.skill ? 20 : 10), engaged: 0 };
+            log(`📜 quest accepted: ${p.title}${p.skill ? ' (skill warm-up)' : p.monster ? ` → ${p.monster}` : ''} ${p.skill ? `(use ${p.need||20} skills)` : p.gather ? `(gather ${p.need||'?'}× ${p.item||'item'})` : `(min ${fmtDmg(p.minDmg)})`}`, '#9cf');
           } else log(`quest accept failed (${p.title}): ${r?.message || 'no resp'}`, '#f66');
         } else {
           dlog(`quests: none available · ${_questCooldowns.length} on cooldown`, '#778');
@@ -2198,6 +2391,9 @@ async function processQuests() {
   // "pending" so the caller skips the waves until the quest slot is empty.
   const q = S.questActive;
   if (q && (q.have || 0) < (q.need || 10)) {
+    // SKILL WARM UP quest: no mob to farm — cast a mana class skill on any alive monster and
+    // drink mana potions to keep casting. Progress (have/need) is re-read from the guild page.
+    if (q.skill) { await skillWarmup(q); return true; }
     // GATHER quests: DELIVER whatever the mob already dropped into the inventory (this is what
     // credits the progress bar — kills alone don't). Runs BEFORE the coverage check so it also
     // works when the item mob is farmed via the user's own config waves. Throttled internally.
@@ -3083,7 +3279,6 @@ async function mainLoop() {
     let questPending = false;
     try {
       await refreshTimers();   // keep boss death/respawn countdowns fresh (throttled 15s)
-      await refreshDuel();     // multi-phase boss Duel Phase → dashboard signal (throttled 60s)
       if (S.autolevel) await allocateStats();   // spend free stat points → stamina (throttled)
       await maybeRestockMana();                 // keep Small Mana Potions stocked (opt-in, throttled)
       // Phase 0 — guild dungeon bosses (battle.php?dgmid) — single boss per source
@@ -3096,11 +3291,17 @@ async function mainLoop() {
           else await processDungeonLocation(src);
         }
       }
-      // Phase 1 — timed bosses (priorità assoluta, usano stamina poi pozione)
+      // Phase 1 — timed bosses (priorità assoluta, usano stamina poi pozione). Duel bosses
+      // (multi-phase Olympus gods) go through processDuelBoss (phase 1 → headless duel →
+      // phase 3); plain timed bosses through processWave.
       for (const wave of WAVES) {
         if (paused || !running) break;
-        const timedTargets = wave.targets.filter(t => t.timer);
-        if (timedTargets.length) await processWave(wave, timedTargets);
+        const plainTimed = wave.targets.filter(t => t.timer && !t.duel);
+        if (plainTimed.length) await processWave(wave, plainTimed);
+        for (const t of wave.targets.filter(t => t.timer && t.duel)) {
+          if (paused || !running) break;
+          await processDuelBoss(wave, t);
+        }
       }
       // Phase 1.4 — Battle Pass hunt check (throttled 1h): skip bp-hunt source when done.
       if (!paused && running) await checkBpHunt();
@@ -3206,82 +3407,116 @@ let uiContent, uiPanel, minimized = S.minimized === true, activeTab = 'status';
 
 function renderStatus() {
   const now    = Date.now();
-  const sc     = paused ? '#fa0' : '#2f8';
-  const st     = paused ? '⏸ PAUSED' : `▶ ${status}`;
-  const totalK = Object.values(S.kills).reduce((a,b) => a+b, 0);
-
-  // compact stat grid (2 columns) — più info, font leggermente più grande
-  const stat = (ic, val, lbl, col = '#cfe') =>
-    `<div style="display:flex;align-items:baseline;gap:5px">
-       <span style="font-size:13px">${ic}</span>
-       <b style="color:${col};font-size:13px">${val}</b>
-       <span style="color:#667;font-size:11px">${lbl}</span>
-     </div>`;
   const potStock = STAM_POTS.map(p => `${p.name} ${S.potInv?.[p.item]?.qty ?? '?'}`).join('/');
   const potNone  = !pickPotion();
+
+  // is anything actually configured to attack? drives the onboarding empty-state.
+  const hasTargets = (S.config || []).some(w => w.enabled !== false &&
+    ((w.targets && w.targets.length) || w.kind === 'single' || w.kind === 'dungeon'));
+
+  // ── live state badge: what is the bot doing RIGHT NOW ─────────────────────────
+  const inDuel = !paused && /duel|🤺/i.test(status);
+  const badge  = paused  ? { t: '⏸ Paused', c: '#fa0', bg: '#33290f' }
+               : inDuel  ? { t: '🤺 Duel',  c: '#c9a0ff', bg: '#241a33' }
+               : hasTargets ? { t: '▶ Running', c: '#39d97f', bg: '#12291c' }
+                            : { t: '◆ Not set up', c: '#8ab', bg: '#16202a' };
+
+  // ── ONBOARDING — nothing set up yet: tell the user exactly what to do ──────────
+  if (!hasTargets) {
+    return `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="background:${badge.bg};color:${badge.c};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:bold">${badge.t}</span>
+      </div>
+      <div style="background:#10161f;border:1px solid #24405a;border-radius:8px;padding:11px 12px">
+        <div style="color:#cfe6ff;font-size:13px;font-weight:bold;margin-bottom:8px">👋 How it works</div>
+        <div style="color:#9db4c9;font-size:11px;line-height:1.7">
+          The bot does nothing until you tell it <b style="color:#cfe">what to attack</b>.
+          <div style="margin-top:8px">
+            <b style="color:#7ab8ff">1.</b> Open a <b>wave / boss / dungeon</b> page in the game<br>
+            <b style="color:#7ab8ff">2.</b> Open <b>⚙ Setup</b> → press <b style="color:#9cf">🔍 Scan this page</b><br>
+            <b style="color:#7ab8ff">3.</b> Tick a monster, set the <b>damage</b> and pick<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<b style="color:#fab">⏰ Timed</b> or <b style="color:#7df">🎯 Farm</b>, then <b style="color:#7fa">💾 Save</b><br>
+            <b style="color:#7ab8ff">4.</b> ▶ The bot runs on its own
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:11px">
+          <button data-status-action="open-setup" style="flex:1;background:#2a3a6a;color:#cfe;border:none;border-radius:6px;padding:8px;cursor:pointer;font:bold 11px monospace">⚙ Open Setup</button>
+          <button data-status-action="open-guide" style="flex:1;background:#252540;color:#c9a0ff;border:none;border-radius:6px;padding:8px;cursor:pointer;font:bold 11px monospace">📖 Guide</button>
+        </div>
+      </div>`;
+  }
+
+  // ── compact top strip: state badge + key live figures ─────────────────────────
+  const lph = lvlPerHour();
+  const chip = (ic, val, col = '#cfe', title = '') =>
+    `<span title="${title}" style="display:inline-flex;align-items:baseline;gap:3px;font-size:12px">
+       <span>${ic}</span><b style="color:${col}">${val}</b></span>`;
   let h = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:7px">
-      ${stat('⚡', stam.toLocaleString(), 'stamina', stam > 0 ? '#0cf' : '#f66')}
-      ${stat('⏱', fmt(now - S.started), 'uptime')}
-      ${stat('💀', totalK.toLocaleString(), 'farm kills')}
-      ${stat('👑', S.timedKills.toLocaleString(), 'boss kills', '#f90')}
-      ${stat('🧪', potStock, 'stamina pots left' + (potNone ? ' ⚠' : ''), potNone ? '#f66' : '#cfe')}
-      ${stat('🧴', S.lspUses.toLocaleString(), 'pots used')}
-      ${stat('❤️', S.hpHeals.toLocaleString(), 'HP heals' + (hpEmpty ? ' (0!)' : ''), hpEmpty ? '#f66' : '#cfe')}
-      ${(() => { const lph = lvlPerHour();
-         return stat('📈', lph == null ? '—' : lph.toFixed(lph >= 10 ? 0 : 1),
-                     'lvl/hr' + (userLevel != null ? ` · LV${userLevel.toLocaleString()}` : ''),
-                     '#bda4ff'); })()}
+    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:6px">
+      <span style="background:${badge.bg};color:${badge.c};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:bold;white-space:nowrap">${badge.t}</span>
+      ${chip('⚡', stam.toLocaleString(), stam > 0 ? '#0cf' : '#f66', 'stamina')}
+      ${chip('📈', lph == null ? '—' : lph.toFixed(lph >= 10 ? 0 : 1) + '/h', '#bda4ff', 'levels per hour' + (userLevel != null ? ` · LV ${userLevel}` : ''))}
+      ${chip('🧪', potStock, potNone ? '#f66' : '#cfe', 'stamina potions left' + (potNone ? ' — empty!' : ''))}
+      ${chip('👑', S.timedKills.toLocaleString(), '#f90', 'boss kills')}
     </div>
-    <div style="color:${sc};font-size:12px;margin:2px 0 8px;overflow:hidden;
-      text-overflow:ellipsis;white-space:nowrap">${paused ? '⏸ PAUSED' : '▶ '}${esc(status)}</div>
+    <div style="color:#8fa;font-size:11px;margin:0 0 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${paused ? '' : '↳ '}${esc(paused ? 'paused — play by hand; the bot won\'t touch the game' : status)}</div>
   `;
 
-  // boss timers — iterate the bosses we actually target.
-  // alive  → real auto-die countdown from data-expire (liveBoss).
-  // dead   → respawn countdown from the auto-summon next-ts (S.timers, name match).
+  // ── card section helper ───────────────────────────────────────────────────────
+  const card = (icon, title, badgeTxt, body, accent = '#9cf') => `
+    <div style="background:#0e0e18;border:1px solid #23253f;border-radius:8px;padding:8px 9px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+        <span style="color:${accent};font-size:12px;font-weight:bold;flex:1">${icon} ${title}</span>
+        ${badgeTxt ? `<span style="color:#8898b0;font-size:10px;background:#171a2b;border-radius:10px;padding:1px 8px">${badgeTxt}</span>` : ''}
+      </div>${body}
+    </div>`;
+
+  // ── ⏰ BOSS card — iterate the bosses we actually target ───────────────────────
   const timedTargets = WAVES.flatMap(w => w.targets.filter(t => t.timer));
   if (timedTargets.length) {
-    h += `<div style="color:#f90;font-size:11px;font-weight:bold;margin-bottom:3px">⏰ Boss timers <span style="color:#666;font-weight:normal">· ${S.timedKills} done</span></div>`;
+    let body = '';
     for (const t of timedTargets) {
       const exp  = liveBoss[t.key];                                 // alive auto-die ts (s)
       const tm   = Object.entries(S.timers).find(([nm, v]) => v && t.match({ name: nm }));
       const done = S.timedBy[t.key] || 0;
       let info;
-      if (exp) {
-        info = `<span style="color:#2f8">✅ alive · dies in ${fmt(exp * 1000 - now)}</span>`;
-      } else if (tm && tm[1].nextTs) {
-        const left = tm[1].nextTs * 1000 - now;
-        info = left > 0
-          ? `<span style="color:#ff6">⟳ respawn in ${fmt(left)}</span>`
-          : `<span style="color:#2f8">✅ ready!</span>`;
-      } else {
-        info = `<span style="color:#777">… waiting for data</span>`;
+      if (exp)                       info = `<span style="color:#2f8">✅ alive · dies ${fmt(exp * 1000 - now)}</span>`;
+      else if (tm && tm[1].nextTs) { const left = tm[1].nextTs * 1000 - now;
+        info = left > 0 ? `<span style="color:#ff6">⟳ respawn ${fmt(left)}</span>` : `<span style="color:#2f8">✅ ready!</span>`; }
+      else                           info = `<span style="color:#777">… waiting</span>`;
+
+      // duel bosses show which phase the bot is in (P1 / duel / P3)
+      let phaseChip = '';
+      if (t.duel) {
+        const d = (S.duel || {})[t.key] || {};
+        phaseChip = (d.retryAt && now < d.retryAt)
+            ? `<span style="color:#fa0;font-size:9px;margin-left:4px" title="duel lost — retrying">🤺 retry ${fmt(d.retryAt - now)}</span>`
+          : d.dueled
+            ? `<span style="color:#c9a0ff;font-size:9px;margin-left:4px" title="duel won — farming phase 3">🤺 P3</span>`
+            : `<span style="color:#c9a0ff;font-size:9px;margin-left:4px" title="phase 1 / plays the duel when it starts">🤺 P1</span>`;
       }
-      const short = t.label.length > 22 ? t.label.slice(0,22)+'…' : t.label;
-      // compact single row (name left · status right) — smaller text for mobile
-      h += `<div style="font-size:10px;line-height:1.35;margin-bottom:2px;display:flex;justify-content:space-between;gap:6px">
-        <span style="color:#fab;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${short}${done ? ` <span style="color:#2f8">×${done}</span>` : ''}</span>
+      const short = t.label.length > 20 ? t.label.slice(0,20)+'…' : t.label;
+      body += `<div style="font-size:10px;line-height:1.4;margin-bottom:2px;display:flex;justify-content:space-between;gap:6px">
+        <span style="color:#fab;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(short)}${phaseChip}${done ? ` <span style="color:#2f8">×${done}</span>` : ''}</span>
         <span style="flex-shrink:0">${info}</span></div>`;
     }
-    h += `<div style="border-top:1px solid #2a2a44;margin:7px 0"></div>`;
+    h += card('⏰', 'Boss', `${timedTargets.length} · ${S.timedKills} done`, body, '#fab');
   }
 
-  // adventurer's guild quests — active quest + accepted/done counters
+  // ── 📜 QUEST card ─────────────────────────────────────────────────────────────
   if (S.questEnabled) {
     const q = S.questActive;
-    h += `<div style="color:#9c6;font-size:12px;font-weight:bold;margin-bottom:5px">📜 Quests
-      <span style="color:#666;font-weight:normal">· ${S.questDone} done · ${S.questTaken} taken</span></div>`;
+    let body;
     if (q) {
       const short = (q.title || '').length > 26 ? q.title.slice(0,26)+'…' : (q.title || 'quest');
-      h += `<div style="font-size:12px;margin-bottom:4px;color:#cfa">
-        ${esc(short)}<br>&nbsp;&nbsp;→ <span style="color:#7df">${esc(q.monster || 'g3w5 mobs')}</span>
-        <span style="color:#9c6"> ${q.have ?? 0}/${q.need ?? 10}</span>
-        <span style="color:#778;font-size:10px"> · engaged ${q.engaged ?? 0}</span></div>`;
+      const objective = q.skill ? 'casting skills' : q.gather ? (q.item || 'gather item') : (q.monster || 'g3w5 mobs');
+      body = `<div style="font-size:11px;color:#cfa;line-height:1.5">${esc(short)}<br>
+        &nbsp;&nbsp;→ <span style="color:#7df">${esc(objective)}</span>
+        <span style="color:#9c6">${q.have ?? 0}/${q.need ?? (q.skill ? 20 : 10)}</span></div>`;
     } else {
-      h += `<div style="font-size:12px;margin-bottom:4px;color:#777">… all on cooldown (2-day rotation)</div>`;
+      body = `<div style="font-size:11px;color:#777">… all on cooldown (2-day rotation)</div>`;
     }
-    h += `<div style="border-top:1px solid #2a2a44;margin:7px 0"></div>`;
+    h += card('📜', 'Quest', `${S.questDone} done`, body, '#9c6');
   }
 
   // farm progress — limit per mob comes from its matching farm target (no hardcode)
@@ -3299,11 +3534,7 @@ function renderStatus() {
     .map(name => [name, S.kills[name] || 0])
     .sort((a, b) => b[1] - a[1]);
   if (killRows.length) {
-    h += `<div style="color:#0af;font-size:12px;font-weight:bold;margin-bottom:5px;display:flex;align-items:center;gap:6px">
-      <span style="flex:1">🎯 Farming</span>
-      <button data-status-action="reset-farm" title="reset farmed monsters (kills + list)"
-        style="background:#3a2a2a;color:#f99;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px">🗑</button>
-    </div>`;
+    let body = '';
     for (const [name, k] of killRows) {
       const lim   = limitForName(name);
       const done  = lim != null && k >= lim;
@@ -3312,10 +3543,11 @@ function renderStatus() {
       const prog  = lim != null
         ? `<span style="color:#333"> ${bar(Math.min(k,lim),lim,12)}</span><span style="color:${color}"> ${k}/${lim}${done?' ✓':''}</span>`
         : `<span style="color:${color}"> ×${k}</span>`;
-      h += `<div style="font-size:12px;margin-bottom:4px">
-        <span style="color:#7df">${short}</span>${prog}
-      </div>`;
+      body += `<div style="font-size:11px;margin-bottom:3px"><span style="color:#7df">${esc(short)}</span>${prog}</div>`;
     }
+    const resetBtn = `<button data-status-action="reset-farm" title="reset farmed monsters (kills + list)"
+        style="background:#3a2a2a;color:#f99;border:none;border-radius:10px;padding:1px 8px;cursor:pointer;font-size:10px">🗑 reset</button>`;
+    h += card('🎯', 'Farm', resetBtn, body, '#0af');
   }
 
   return h;
@@ -3360,16 +3592,32 @@ function parseAmount(s) {
 // build a runtime target from a scanned mob name. srcName links the checklist row
 // back to the target; include is the core token so it still matches if the boss's
 // full title shifts. LSP + timer are derived (boss/timed → auto LSP, farm → none).
+// Olympus gods that run the 3-phase cycle (phase 1 → solo PvP Duel Phase → phase 3).
+// Detected from a scanned boss name = "<god>, <Sovereign|Divine|Duelist|Ascended> …".
+// Heralds like "Pan, Wild Herald of Hermes" are NOT duel bosses — their first token isn't
+// a god, so they're skipped. See the DUEL PHASE ENGINE + reference-duel-phase-bosses.
+const OLYMPUS_GODS = ['ares', 'artemis', 'hermes', 'poseidon', 'apollo', 'zeus', 'athena',
+                      'hades', 'hera', 'demeter', 'dionysus', 'hephaestus', 'aphrodite'];
+function detectDuelGod(name) {
+  const n = String(name).toLowerCase().trim();
+  const m = n.match(/^([a-z]+),/);
+  if (!m || !OLYMPUS_GODS.includes(m[1])) return null;
+  return /\b(sovereign|divine|duelist|ascended)\b/.test(n) ? m[1] : null;
+}
+
 function mkTarget(name, boss) {
   const full = name.toLowerCase().trim();
+  const god  = boss ? detectDuelGod(name) : null;   // multi-phase Olympus boss?
   return {
     key: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     label: name, srcName: name,
-    // boss → match on the FULL name so similarly-titled summon bosses don't collide
-    // (e.g. "Hermes, Divine Herald of the Endless Road" must NOT also match
-    // "Pan, Wild Herald of Hermes"). farm → short first-segment token.
-    include: [boss ? full : full.split(',')[0].trim()], exclude: [],
-    dmgTarget: boss ? 3_000_000_000 : 100_000_000,   // boss: 3B (edit in UI); farm: 100M/mob
+    // DUEL boss → match on the god name + comma ("ares,") so it follows the boss through ALL
+    // three phase names (Sovereign→Duelist→Ascended) while never colliding with a herald
+    // ("Pan, Wild Herald of Hermes" doesn't contain "hermes,"). Plain boss → match the FULL
+    // name so similarly-titled summon bosses don't collide. Farm → short first-segment token.
+    include: [god ? god + ',' : (boss ? full : full.split(',')[0].trim())], exclude: [],
+    dmgTarget: boss ? 3_000_000_000 : 100_000_000,   // boss/duel phase 1: 3B (edit in UI); farm: 100M/mob
+    ...(god ? { duel: true, phase3Dmg: 3_000_000_000 } : {}),   // P3 target (edit in UI)
     killLimit: boss ? null : 400,
     useLSP: 'asNeeded',   // v1.18.0: farm usa LSP come i boss (FSP mai)
     timer: !!boss, enabled: true,
@@ -3769,7 +4017,7 @@ function renderSettings() {
     let s = `<div style="border:1px solid ${on?'#2f5040':'#23253f'};border-radius:6px;padding:5px 6px;margin-bottom:5px;background:#0e0e18">
       <div style="display:flex;align-items:center;gap:6px">
         <input type="checkbox" data-act="row" data-wi="${wi}" data-name="${esc(name)}" ${on?'checked':''}>
-        <span style="flex:1;color:${boss?'#fab':'#7df'};font-size:12px">${boss?'👑 ':''}${esc(name)}${count!=null?` <span style="color:#556">×${count}</span>`:''}${srcLabel?`<br><span style="color:#556;font-size:9px">📄 ${esc(srcLabel)}</span>`:''}</span>
+        <span style="flex:1;color:${boss?'#fab':'#7df'};font-size:12px">${(t&&t.duel)?'🤺 ':boss?'👑 ':''}${esc(name)}${count!=null?` <span style="color:#556">×${count}</span>`:''}${srcLabel?`<br><span style="color:#556;font-size:9px">📄 ${esc(srcLabel)}</span>`:''}</span>
         ${on?`<button data-action="deltarget" data-wi="${wi}" data-name="${esc(name)}" title="remove target" style="background:#3a2a2a;color:#f88;border:none;border-radius:4px;padding:1px 7px;cursor:pointer;font:12px monospace">✕</button>`:''}
       </div>`;
     if (on) {
@@ -3777,8 +4025,10 @@ function renderSettings() {
       const farm = mode === 'farm';
       const dgb  = mode === 'dungeonboss';
       s += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-left:22px">
-        <span style="color:#9cf;font-size:10px">${dgb ? 'max dmg' : 'stop at'}</span>
-        <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="${dgb ? 'GUILD CAP — the bot stops STRICTLY under this much damage (never crosses it)' : "stop attacking once you've dealt this much damage"}">
+        <span style="color:#9cf;font-size:10px">${dgb ? 'max dmg' : t.duel ? 'P1 stop at' : 'stop at'}</span>
+        <input style="${IN};width:70px" data-fld="dmg" data-wi="${wi}" data-name="${esc(name)}" value="${esc(fmtDmg(t.dmgTarget))}" title="${dgb ? 'GUILD CAP — the bot stops STRICTLY under this much damage (never crosses it)' : t.duel ? 'Phase 1 damage target (leaderboard). The bot attacks phase 1 up to here, then plays the Duel Phase.' : "stop attacking once you've dealt this much damage"}">
+        ${t.duel ? `<span style="color:#c9a0ff;font-size:10px" title="Phase 3 damage target (combined total damage to this boss = the XP cap number shown on the card). After winning the duel the bot attacks phase 3 up to here.">P3 stop at</span>
+        <input style="${IN};width:70px" data-fld="phase3" data-wi="${wi}" data-name="${esc(name)}" value="${esc(fmtDmg(t.phase3Dmg || t.dmgTarget))}" title="Phase 3 target — set this to the boss's XP cap (the big number on the card), e.g. 54b">` : ''}
         <label style="color:#fab;font-size:11px;display:flex;align-items:center;gap:3px;cursor:pointer" title="Timed boss: fight to the damage target, then move on (may use potions)">
           <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="timed" ${mode==='timed'?'checked':''}> ⏰ Timed
         </label>
@@ -3789,6 +4039,7 @@ function renderSettings() {
           <input type="radio" name="${grp}" data-act="mode" data-wi="${wi}" data-name="${esc(name)}" value="farm" ${farm?'checked':''}> 🎯 Farm</label>`;
       if (farm) s += `<input style="${IN};width:46px" data-fld="killLimit" data-wi="${wi}" data-name="${esc(name)}" value="${esc(t.killLimit ?? 400)}" title="how many monsters to kill"><span style="color:#556;font-size:10px">kills</span>`;
       if (dgb)  s += `<div style="flex-basis:100%;color:#8a7fb8;font-size:9px;margin-top:2px;line-height:1.4">🏰 attacks on its own the instant the room opens (~3s, AFK) and stops <b>below</b> ${esc(fmtDmg(t.dmgTarget))} — never over the guild limit</div>`;
+      if (t.duel) s += `<div style="flex-basis:100%;color:#c9a0ff;font-size:9px;margin-top:2px;line-height:1.4">🤺 <b>Duel boss</b> (auto-detected): farms phase 1 → <b>plays the solo PvP duel for you</b> → farms phase 3. Winning the duel depends on this account's gear; on a loss it retries in 10&nbsp;min.</div>`;
       // "match name ⊇" — only attack monsters whose name CONTAINS one of these words.
       // For a multi-phase boss (Hermes: phase1 "Divine Herald", phase2 "Fleet Duelist",
       // phase3 "Ascended Herald") type the phase-only word — e.g. "ascended" — so the bot
@@ -3945,6 +4196,9 @@ function wireSettings() {
     if (f === 'dmg') {
       const n = parseAmount(el.value);
       if (n != null) t.dmgTarget = n;
+    } else if (f === 'phase3') {
+      const n = parseAmount(el.value);
+      if (n != null) t.phase3Dmg = n;
     } else if (f === 'killLimit') {
       const raw = el.value.replace(/[^\d]/g, '');
       t.killLimit = raw === '' ? 1 : Math.max(1, parseInt(raw));
@@ -4041,7 +4295,41 @@ function renderUI() {
   if (ae && uiContent.contains(ae) && /^(SELECT|INPUT|TEXTAREA)$/.test(ae.tagName)) return;
   uiContent.innerHTML = activeTab === 'pvp' ? renderPvp()
                       : activeTab === 'log' ? renderLog()
+                      : activeTab === 'guide' ? renderGuide()
                       : renderStatus();
+}
+
+// ── 📖 GUIDE TAB — plain-language explainer so first-timers get the bot ──────────
+function renderGuide() {
+  const sec = (icon, title, lines) => `
+    <div style="background:#0e0e18;border:1px solid #23253f;border-radius:8px;padding:9px 10px;margin-bottom:8px">
+      <div style="color:#c9a0ff;font-size:12px;font-weight:bold;margin-bottom:5px">${icon} ${title}</div>
+      <div style="color:#aeb9cc;font-size:11px;line-height:1.65">${lines}</div>
+    </div>`;
+  return `
+    <div style="color:#8fa;font-size:11px;margin-bottom:9px">How the bot works, in short. Close this tab with <b>Status</b>.</div>
+    ${sec('🤖', 'What it does', `Attacks monsters, bosses and quests on its own while you're away — and can play PvP.
+      It does <b>nothing</b> until you tell it what to attack.`)}
+    ${sec('⚙', 'Setup in 3 steps', `
+      <b style="color:#7ab8ff">1.</b> Open a wave/boss/dungeon page, then <b>⚙ Setup</b> → <b style="color:#9cf">🔍 Scan this page</b><br>
+      <b style="color:#7ab8ff">2.</b> Tick a monster, set the <b>damage</b> and pick <b style="color:#fab">⏰ Timed</b> or <b style="color:#7df">🎯 Farm</b><br>
+      <b style="color:#7ab8ff">3.</b> Press <b style="color:#7fa">💾 Save</b> — the bot starts`)}
+    ${sec('⏰', 'Timed vs 🎯 Farm', `
+      <b style="color:#fab">Timed</b> = a boss with a damage goal: it hits until there, then moves on (uses potions).<br>
+      <b style="color:#7df">Farm</b> = grind normal monsters up to a kill count.`)}
+    ${sec('🤺', 'Duel bosses (Olympus)', `
+      The gods (Ares, Hermes, Artemis, Poseidon…) have <b>3 phases</b>: PvE → <b>PvP duel</b> → PvE.<br>
+      The bot now <b>plays the duel for you</b>. Winning depends on your <b>gear</b>; on a loss it retries after 10&nbsp;min.<br>
+      In Setup you set two targets: <b>P1</b> (phase 1) and <b>P3</b> (phase 3 = the boss's XP cap).`)}
+    ${sec('🧪', 'Potions', `
+      By default it only uses <b>Large Stamina Potions</b> — <b>never</b> your Full Stamina Potions.<br>
+      HP auto-heal is a slider in Setup (0% = never).`)}
+    ${sec('⚔', 'PvP (optional)', `A module that plays the solo ladder and learns every class. Turn it on from the ⚔PvP tab.`)}
+    ${sec('⏸', 'Pause', `Press ⏸ to play by hand: the bot fully stops touching the game.`)}
+    ${sec('❓', 'Common problems', `
+      <b>Nothing happens</b> → no target set yet (run the Scan).<br>
+      <b>A boss isn't attacked</b> → check the damage target and the <i>match name ⊇</i> filter.`)}
+  `;
 }
 
 // Reset ONLY the top counters (uptime, boss kills, heals, potions used, attacks,
@@ -4118,6 +4406,8 @@ function buildUI() {
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">📋 Log</button>
       <button id="vfb-tab-g" style="background:#252540;color:#aaa;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚙ Setup</button>
+      <button id="vfb-tab-guide" title="How the bot works" style="background:#252540;color:#aaa;border:none;
+        border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">📖</button>
       <button id="vfb-tab-pvp" title="Auto-PvP: ON/OFF + match stats + tokens"
         style="background:#252540;color:#aaa;border:none;
         border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px">⚔PvP</button>
@@ -4223,7 +4513,10 @@ function buildUI() {
     const b = e.target.closest('[data-status-action]');
     if (b) {
       e.stopPropagation();
-      if (b.dataset.statusAction === 'reset-farm') resetFarm();
+      const sa = b.dataset.statusAction;
+      if (sa === 'reset-farm')  resetFarm();
+      else if (sa === 'open-setup') setTab('settings');
+      else if (sa === 'open-guide') setTab('guide');
       return;
     }
     // ⚔ PvP tab actions
@@ -4283,6 +4576,7 @@ function buildUI() {
     sel('vfb-tab-s', t === 'status');
     sel('vfb-tab-l', t === 'log');
     sel('vfb-tab-g', t === 'settings');
+    sel('vfb-tab-guide', t === 'guide');
     sel('vfb-tab-pvp', t === 'pvp');
     if (t === 'settings') renderSettings();
     else renderUI();
@@ -4290,6 +4584,7 @@ function buildUI() {
   }
   document.getElementById('vfb-tab-s').onclick = e => { e.stopPropagation(); setTab('status'); };
   document.getElementById('vfb-tab-l').onclick = e => { e.stopPropagation(); setTab('log'); };
+  document.getElementById('vfb-tab-guide').onclick = e => { e.stopPropagation(); setTab(activeTab === 'guide' ? 'status' : 'guide'); };
   document.getElementById('vfb-tab-pvp').onclick = e => { e.stopPropagation(); setTab(activeTab === 'pvp' ? 'status' : 'pvp'); };
   // ⚙ toggles Settings open/closed (closing returns to Status)
   document.getElementById('vfb-tab-g').onclick = e => {
