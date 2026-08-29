@@ -2,7 +2,7 @@
 // @name         Veyra Multi-Farm Bot
 // @namespace    https://demonicscans.org/
 // @author       UANM
-// @version      1.86.0
+// @version      1.87.0
 // @description  Multi-farm: wave + GUILD DUNGEON bosses (battle.php?dgmid) + GUILD DUNGEON LOCATION pages (many .mon instances, farm by name) + AUTO Adventurer's Guild quests (accept→farm g3w5→turn in→next, 2-day rotation) · uses ONLY LSP (251), never FSP — FSP stash stays untouched · English UI · "Scan this page" · per-page targets with ✕ · ⏰timed/🎯farm · billions damage target (3b) · loots dead · pause persists (manual play) · live-apply edits · mobile-friendly panel · respects view tabs · auto-heal · PREDICTIVE potion-saver: before drinking, computes whether looting the about-to-die mobs will LEVEL UP (free stamina refill) from learned exp-per-mob, and waits+loots instead of drinking · precise tiers (≤x100, never 200/1000) on threshold/cap targets, free overshoot on farm trash · ⚔ AUTO-PvP module on /pvp pages: self-matchmakes the solo ladder, plays each turn DATA-DRIVEN from the learned DB (best learned net damage it can afford, spends the FULL Rage bar on its best learned nuke instead of wasting it on Slash, drops Slash vs healers, lethal check, Berserker anti-nuke = Rampage Howl at 100 Rage for -40% incoming damage), LEARNS every match into a per-enemy-class DB (incl. empowered full-Rage skill effects), ON/OFF toggle to play by hand · v1.67: 📡 SCOUT — learns EVERY class by reading the logs of other players' Recent Solo Battles (no need to fight them), generic anti-nuke + self-heal so any class plays well, and a working 🆕 season reset (keeps learned classes) / 🗑 full wipe · v1.70: 🎯 BOSS (exact dmg) — open ANY mob's battle.php?id page, Scan it, and the bot attacks that exact mob until YOUR total damage reaches the value you set (near-exact, overshoot ≤ one 1-stam hit), then stops; 🗑 delete it when done · optional 🥤 "use FSP when LSP runs out" fallback toggle (off by default — FSP stash stays untouched) · v1.75: 🧊 CUBE AUTO (multibox source cubeAuto) — enumerates TODAY's Polyhedral Crucible open lanes live each pass (no re-scan when a new cube opens), one shared hard cap for every lane mob · v1.80: 📜 quests are NEVER given up (2-day cooldown = precious skill points) — a stalled quest is kept and the farm falls back to the general waves meanwhile; blacklist removed (always re-take offered quests). Complete a quest by configuring its mob's wave (e.g. g3w5 lizards) in the account config so wave loots credit it · v1.84: 📜 GATHER quests now KILL the source mob (target 5b, fightTarget stops at 'dead') instead of tagging it at 100k — a tagged mob auto-dies on its ~48h timer and drops nothing, leaving the account idle on full stamina; killing produces a fresh corpse to loot → real drop rolls (mirrors multibot 2026-08-17 fix) · v1.85: 🤺 FULL-AUTO DUEL PHASE — the multi-phase Olympus gods (Ares/Artemis/Hermes/Poseidon…) are now played end-to-end: phase 1 PvE → the solo-PvP Duel Phase is PLAYED HEADLESS by the bot (greedy max-damage, token-aware, blacklists uncastable nukes, heal/revive) → phase 3 PvE. Auto-detected on Scan (matches the god name across all 3 phase titles), with separate P1/P3 damage targets in Setup; winning depends on the account's gear, retries in 10m on a loss (ported from the Multibox engine). UI REDESIGN: card-based Status (Boss/Quest/Farm sections + live state badge + per-boss duel phase chip), an onboarding empty-state that walks a first-timer through Scan→tick→Save, and a new 📖 Guide tab explaining every feature in plain language · v1.86: 🐛 FSP-before-LSP fix (refreshInv read an unreadable LSP count as "0 left" → the bot jumped to the FSP fallback while LSP were still in the bag; now an unreadable count = UNKNOWN, so LSP stay preferred and FSP is only spent once LSP are truly out — mirrored in the multibox engine) + 📜 SKILL WARM-UP quests ("use N skills against monsters") now played automatically (ported from the multibox: reads the account's own skills off a mob's battle page, casts the cheapest MANA class skill, drinks Large→Small mana potions to keep casting; needs a class selected at LV200+)
 // @match        https://demonicscans.org/*
 // @updateURL    https://raw.githubusercontent.com/stizzen-create/veyra-farm/main/farm_tampermonkey.user.js
@@ -4378,6 +4378,19 @@ function buildUI() {
     document.head.appendChild(st);
   }
 
+  // MOBILE FLOAT FIX: some game pages ship WITHOUT a <meta viewport>, so mobile browsers
+  // fall back to a ~980px layout viewport. `position:fixed` then anchors to THAT 980px
+  // box (not the visible screen), so the panel lands far off to the right — it looks like
+  // it isn't floating and can't be dragged back into view. Inject a viewport meta only if
+  // the page is missing one (same fix as the Arena overlay). (user: "su mobile la finestra
+  // non è floating e spesso va fuori".)
+  if (!document.querySelector('meta[name="viewport"]')) {
+    const vp = document.createElement('meta');
+    vp.name = 'viewport';
+    vp.content = 'width=device-width, initial-scale=1';
+    document.head.appendChild(vp);
+  }
+
   uiPanel = document.createElement('div');
   Object.assign(uiPanel.style, {
     position: 'fixed', bottom: '8px', right: '8px',
@@ -4559,12 +4572,32 @@ function buildUI() {
   // PvP (e le checkbox skill/restrict) non reagivano ("dropdown lockato su Archer").
   wireSettings();
 
-  // restore saved position (left/top) if the panel was dragged before
-  if (S.pos && S.pos.left != null) {
-    const left = Math.max(0, Math.min(window.innerWidth  - 60, S.pos.left));
-    const top  = Math.max(0, Math.min(window.innerHeight - 36, S.pos.top));
+  // restore saved position (left/top) if the panel was dragged before.
+  // Clamp so the WHOLE panel stays on-screen (was `innerWidth - 60`, which let all but
+  // 60px slide off the right edge — the draggable header went with it, so you could no
+  // longer grab it to reposition). Uses the real panel size, falling back to the CSS width.
+  function clampPanel() {
+    if (!uiPanel || uiPanel.style.display === 'none') return;
+    if (!S.pos || S.pos.left == null) return;
+    const w = uiPanel.offsetWidth  || 330;
+    const h = uiPanel.offsetHeight || 40;
+    const left = Math.max(0, Math.min(window.innerWidth  - w, S.pos.left));
+    // keep at least the header (~40px) reachable even if the panel is taller than the screen
+    const top  = Math.max(0, Math.min(Math.max(0, window.innerHeight - 40), S.pos.top));
     Object.assign(uiPanel.style, { left: left+'px', top: top+'px', right: 'auto', bottom: 'auto' });
   }
+  clampPanel();
+  // A phone rotation or the mobile address bar hiding/showing changes innerWidth/Height and
+  // can leave a previously-valid position off-screen → re-clamp the panel (and the dock)
+  // back into view so it's always reachable. (user: "spesso va fuori e non è riposizionabile".)
+  window.addEventListener('resize', () => {
+    clampPanel();
+    if (S.dockPos && S.dockPos.left != null) applyDockPos(S.dockPos.left, S.dockPos.top);
+  });
+  window.addEventListener('orientationchange', () => setTimeout(() => {
+    clampPanel();
+    if (S.dockPos && S.dockPos.left != null) applyDockPos(S.dockPos.left, S.dockPos.top);
+  }, 250));
 
   function setTab(t) {
     activeTab = t;
